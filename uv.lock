@@ -1,3 +1,8 @@
 version = 1
 revision = 3
-requires-python = ">=3.12"
+requires-python = ">=3.10"
+
+[[package]]
+name = "sbi-for-diffusion-models"
+version = "0.1.0"
+source = { editable = "." }
