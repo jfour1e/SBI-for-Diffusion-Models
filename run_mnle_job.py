@@ -7,6 +7,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+# set up directory for calling from src
 REPO_ROOT = Path(__file__).resolve().parent
 SRC_DIR = REPO_ROOT / "src"
 sys.path.insert(0, str(SRC_DIR))
@@ -16,6 +17,7 @@ from sbi_for_diffusion_models.mnle import train_mnle, run_parameter_recovery
 from sbi.utils import MultipleIndependent
 from torch.distributions import Beta, Uniform, LogNormal, HalfNormal
 
+# define prior for each argument in theta 
 def make_prior():
     prior = MultipleIndependent(
         [
@@ -34,16 +36,17 @@ def make_prior():
 def main():
     prior = make_prior()
 
+    # define trials, sessions and posterior samples for qsub job 
     p = argparse.ArgumentParser()
-    p.add_argument("--num_simulations", type=int, default=1_000_000)
-    p.add_argument("--num_trials_session", type=int, default=200)
-    p.add_argument("--num_posterior_samples", type=int, default=20_000)
+    p.add_argument("--num_simulations", type=int, default=1_000)
+    p.add_argument("--num_trials_session", type=int, default=10)
+    p.add_argument("--num_posterior_samples", type=int, default=500)
     p.add_argument("--outdir", type=str, default="outputs/latest")
     args = p.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
 
-    # One true theta, one synthetic dataset, one trained model.
+    # run parameter recovery experiment  
     theta_true, x_o, posterior, posterior_samples, trainer = run_parameter_recovery(
         prior = prior,
         num_simulations=args.num_simulations,
@@ -52,7 +55,7 @@ def main():
         theta_true=None,
         mu_sensory=1.0,
     )
-
+ 
     torch.save(
         {
             "theta_true": theta_true,
@@ -66,13 +69,15 @@ def main():
     if estimator is None:
         raise RuntimeError("Could not find trained density estimator on trainer.")
 
+    # freeze weights 
     estimator.eval()
     for p in estimator.parameters():
         p.requires_grad_(False)
-
+    
+    # save torch weights (of Likelihood NN) to directory
     torch.save(estimator.state_dict(), os.path.join(args.outdir, "mnle_estimator_state_dict.pt"))
     
-    # quick marginals plot
+    # simple marginals plot
     labels = ["bias","lam","nu","B","sigma_a","t_nd","sigma_s"]
     s = posterior_samples.detach().cpu().numpy()
     fig, axes = plt.subplots(1, s.shape[1], figsize=(3.0 * s.shape[1], 3))

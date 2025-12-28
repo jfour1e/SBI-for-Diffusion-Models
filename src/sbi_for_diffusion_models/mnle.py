@@ -111,7 +111,7 @@ def run_parameter_recovery(
     plt.suptitle("Parameter Recovery: MNLE posterior vs prior", fontsize=14)
     plt.show()
 
-    return theta_true, x_o, posterior, posterior_samples
+    return theta_true, x_o, posterior, posterior_samples, trainer
 
 
 def plot_empirical_rt_choice(x_o: torch.Tensor, title: str = "Observed data"):
