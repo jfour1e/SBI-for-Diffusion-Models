@@ -119,19 +119,21 @@ def _simulate_rt_choice_batch_torch(
             choice = torch.where(hit_lower, torch.zeros_like(choice), choice)
             hit = hit | newly_hit
 
-    # For non-hits: decision ends at n_steps, choice by final position relative to midpoint
+    outcome = choice.clone()  # for hits this is already 0/1
+
     not_hit = ~hit
     if torch.any(not_hit):
-        # if n_steps==0, treat as immediate; otherwise end-of-window
+        # censoring time in steps (decision window length)
         end_step = torch.clamp(n_steps, min=0)
         hit_step = torch.where(not_hit, end_step, hit_step)
-        choice_mid = (a >= (B / 2.0)).to(torch.int64)
-        choice = torch.where(not_hit, choice_mid, choice)
 
-    # Convert to RT seconds: t_nd + hit_step*dt, clamped
+        # mark invalid trials as category 2
+        outcome = torch.where(not_hit, torch.full_like(outcome, 2), outcome)
+
+    # RT always defined (hit time or censoring time) + non-decision time
     rt = (t_nd + hit_step.to(dtype) * dt).clamp(1e-6, float(T_MAX))
 
-    x = torch.stack([rt.to(dtype), choice.to(dtype)], dim=-1)  # (N,2)
+    x = torch.stack([rt.to(dtype), outcome.to(dtype)], dim=-1)  # (N,2)
     return x
 
 
