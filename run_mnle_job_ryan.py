@@ -282,7 +282,7 @@ def main():
 
     # ---- component priors on device ----
     a0_prior  = Beta(torch.tensor(5.0, device=device), torch.tensor(5.0, device=device), validate_args=False)
-    lam_prior = Normal(torch.tensor(0.0, device=device), torch.tensor(0.5, device=device), validate_args=False)
+    lam_prior = LogNormal(torch.tensor(0.0, device=device), torch.tensor(0.5, device=device), validate_args=False)
     v_prior   = LogNormal(torch.tensor(0.0, device=device), torch.tensor(0.5, device=device), validate_args=False)
     B_prior   = LogNormal(torch.tensor(0.3, device=device), torch.tensor(0.5, device=device), validate_args=False)
 
