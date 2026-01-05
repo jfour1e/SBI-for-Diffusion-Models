@@ -1,7 +1,8 @@
 import torch
-torch.distributions.Distribution.set_default_validate_args(False)
+torch.distributions.Distribution.set_default_validate_args(True)
 import matplotlib.pyplot as plt
 import numpy as np
+import math
 
 from torch.distributions import Normal, Beta, LogNormal, TransformedDistribution
 from torch.distributions.transforms import AffineTransform
@@ -89,38 +90,59 @@ class JointPrior(Distribution):
 
 # ----------------------------
 # Pulse-condition "prior" (proposal) for training
-# We do NOT need an exact log_prob; this is a proposal used for MNLE training.
 # ----------------------------
-
-class PulseSequenceProposal(Distribution):
-    """
-    Samples pulse_sides in {-1,+1}^{P} using your existing generator.
-    log_prob is set to 0 (constant) because we only need sampling for training.
-    """
+class PulseSidePrior(Distribution):
     arg_constraints = {}
     has_rsample = False
 
     def __init__(self, P: int, p_success: float, seed: int = 0, device=None):
         super().__init__(validate_args=False)
         self.P = int(P)
-        self.p_success = float(p_success)
+        self.p = float(p_success)
         self.rng = np.random.default_rng(seed)
         self._device = device
+
+        # precompute logs
+        eps = 1e-12
+        p = min(max(self.p, eps), 1.0 - eps)
+        self._logp = float(math.log(p))
+        self._log1mp = float(math.log(1.0 - p))
+        self._loghalf = float(math.log(0.5))
 
     @property
     def event_shape(self):
         return torch.Size([self.P])
 
     def sample(self, sample_shape=torch.Size()):
-        # sample_shape may be multi-dim; we generate prod(sample_shape) sequences and reshape
         n = int(np.prod(sample_shape)) if len(sample_shape) > 0 else 1
-        s_np = generate_pulse_matrix_numpy(self.rng, n_trials=n, n_pulses=self.P, p_success=self.p_success)
+        s_np = generate_pulse_matrix_numpy(self.rng, n_trials=n, n_pulses=self.P, p_success=self.p)
         s = torch.from_numpy(s_np).to(dtype=torch.float32)
         if len(sample_shape) > 0:
             s = s.view(*sample_shape, self.P)
         if self._device is not None:
             s = s.to(self._device)
         return s
+
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        # value shape (..., P), entries expected in {-1, +1}
+        if value.shape[-1] != self.P:
+            raise ValueError(f"Expected value[..., {self.P}], got {tuple(value.shape)}")
+
+        v = value
+        if self._device is not None and v.device != self._device:
+            v = v.to(self._device)
+        v = v.to(torch.float32)
+
+        # Count +1's per sequence (k)
+        k = (v > 0).sum(dim=-1).to(torch.float32)   # shape (...)
+
+        P = float(self.P)
+        # log term if correct_side = +1: +1 with prob p, -1 with prob 1-p
+        log_a = self._loghalf + k * self._logp + (P - k) * self._log1mp
+        # log term if correct_side = -1: +1 with prob 1-p, -1 with prob p
+        log_b = self._loghalf + k * self._log1mp + (P - k) * self._logp
+
+        return torch.logsumexp(torch.stack([log_a, log_b], dim=0), dim=0)
 
 
 class ExtendedProposal(Distribution):
@@ -130,7 +152,7 @@ class ExtendedProposal(Distribution):
     arg_constraints = {}
     has_rsample = False
 
-    def __init__(self, theta_prior: JointPrior, pulse_proposal: PulseSequenceProposal, device=None):
+    def __init__(self, theta_prior: JointPrior, pulse_proposal: PulseSidePrior, device=None):
         super().__init__(validate_args=False)
         self.theta_prior = theta_prior
         self.pulse_proposal = pulse_proposal
@@ -149,29 +171,22 @@ class ExtendedProposal(Distribution):
         return z
 
     def log_prob(self, z):
-        raise NotImplementedError(
-            """
-            ExtendedProposal.log_prob is intentionally undefined 
-            because the pulse proposal does not define a density
-            """
-        )
+        theta = z[..., :5]
+        pulses = z[..., 5:]
+        return self.theta_prior.log_prob(theta) + self.pulse_proposal.log_prob(pulses)
 
 # ----------------------------
-# Pack x for MNLE: x = [rt, choice], with choice LAST (categorical).
+# Pack x for MNLE: x = [rt, choice], with choice LAST, changed to let SBI do the log transform 
 # ----------------------------
-
 def pack_x_rt_choice(rt_choice: torch.Tensor) -> torch.Tensor:
-    rt = rt_choice[:, 0:1].to(torch.float32)
-    choice_int = rt_choice[:, 1:2].to(torch.int64)   # keep as integer-coded
-    # Log-transform ONLY RT:
-    rt_log = torch.log(rt.clamp_min(1e-6))
-    return torch.cat([rt_log, choice_int.to(torch.float32)], dim=1)
+    rt = rt_choice[:, 0:1].to(torch.float32)             # raw rt
+    choice = rt_choice[:, 1:2].to(torch.int64)
+    return torch.cat([rt, choice.to(torch.float32)], dim=1)
 
 
 # ----------------------------
 # Simulator wrapper: (theta_and_pulses) -> x = [rt, choice]
 # ----------------------------
-
 @torch.no_grad()
 def sim_wrapper(theta_and_pulses: torch.Tensor, *, mu_sensory: float, p_success: float, P: int):
     """
@@ -193,7 +208,6 @@ def sim_wrapper(theta_and_pulses: torch.Tensor, *, mu_sensory: float, p_success:
 # ----------------------------
 # Training set generation: (theta+pulses) -> x
 # ----------------------------
-
 @torch.no_grad()
 def simulate_training_set_with_conditions(
     proposal: ExtendedProposal,
@@ -233,7 +247,6 @@ def simulate_training_set_with_conditions(
 # ----------------------------
 # Observed data generation (for demo)
 # ----------------------------
-
 @torch.no_grad()
 def simulate_observed_session(
     theta_true: torch.Tensor,
@@ -276,7 +289,7 @@ def main():
     a0_prior  = Beta(torch.tensor(5.0, device=device), torch.tensor(5.0, device=device), validate_args=False)
     lam_prior = LogNormal(torch.tensor(0.0, device=device), torch.tensor(0.5, device=device), validate_args=False)
     v_prior   = LogNormal(torch.tensor(0.0, device=device), torch.tensor(0.5, device=device), validate_args=False)
-    B_prior   = LogNormal(torch.tensor(0.3, device=device), torch.tensor(0.5, device=device), validate_args=False)
+    B_prior   = LogNormal(torch.tensor(0.5, device=device), torch.tensor(0.5, device=device), validate_args=False)
 
     tnd_prior = TransformedDistribution(
         base_distribution=Beta(torch.tensor(2.0, device=device), torch.tensor(5.0, device=device), validate_args=False),
@@ -290,7 +303,7 @@ def main():
     prior_theta = JointPrior(a0_prior, lam_prior, v_prior, B_prior, tnd_prior, device=device)
 
     # Proposal over pulse conditions (training only)
-    pulse_prop = PulseSequenceProposal(P=P, p_success=0.75, seed=0, device=device)
+    pulse_prop = PulseSidePrior(P=P, p_success=0.75, seed=0, device=device)
 
     # Extended proposal over [theta, pulses]
     proposal = ExtendedProposal(theta_prior=prior_theta, pulse_proposal=pulse_prop, device=device)
@@ -298,7 +311,7 @@ def main():
     # ---- simulate training set (theta + conditions) ----
     z_train, x_train = simulate_training_set_with_conditions(
         proposal,
-        num_simulations=500_000,
+        num_simulations=50_000,
         batch_size=4096,
         device=device,
         mu_sensory=1.0,
@@ -307,23 +320,21 @@ def main():
     )
 
     # ---- build & train MNLE ----
-    # Now x = [rt, choice], so log_transform_x=False is necessary
     estimator_builder = likelihood_nn(
         model="mnle",
-        log_transform_x=False,      # IMPORTANT
+        log_transform_x=True,   
         z_score_theta="independent",
-        z_score_x=None,
+        z_score_x="independent",
     )
 
     trainer = MNLE(prior=proposal, density_estimator=estimator_builder, device=str(device))
-    trainer = trainer.append_simulations(z_train, x_train, data_device="cpu")
-    density_estimator = trainer.train(training_batch_size=4096)
-    print("Estimator device:", next(density_estimator.parameters()).device)
+    trainer.append_simulations(z_train, x_train, data_device="cpu")
+    estimator = trainer.train(training_batch_size=4096)
+    print("Estimator device:", next(estimator.parameters()).device)
 
-    # ---- observed data ----
-    theta_true = torch.tensor([0.55, 0.2, 1.0, 24.0, 0.25], device=device, dtype=torch.float32)
+    # --- prior -- 
+    theta_true = torch.tensor([0.55, 0.2, 1.0, 2.4, 0.25], device=device, dtype=torch.float32)
 
-    # NOTE: MNLE bias can accumulate over thousands of trials; start smaller and scale up carefully.
     num_trials = 300  # set to 3000 later if you want, but confirm behavior first.
     x_o, pulses_o = simulate_observed_session(
         theta_true,
@@ -335,94 +346,13 @@ def main():
         seed=123,
     )
 
-    class ConditionedPulsePotential:
-        """
-        Potential for posterior over global theta given observed (x_i, pulses_i).
-        Uses the trained MNLE estimator q_phi(x | z) with z = [theta, pulses_i].
-        """
+    potential_fn = LikelihoodBasedPotential(estimator, proposal)
 
-        def __init__(self, density_estimator, prior_theta, x_o, pulses_o):
-            self.density_estimator = density_estimator.to("cpu")
-            self.prior_theta = prior_theta
-            self._x_o = x_o.to("cpu", dtype=torch.float32)            # store as _x_o
-            self.pulses_o = pulses_o.to("cpu", dtype=torch.float32)
-            self.device = "cpu"  # IMPORTANT: sbi reads potential_fn.device
-
-            if self._x_o.ndim != 2 or self._x_o.shape[1] != 2:
-                raise ValueError(f"x_o must be (n_trials,2), got {tuple(self._x_o.shape)}")
-            if self.pulses_o.ndim != 2:
-                raise ValueError(f"pulses_o must be (n_trials,P), got {tuple(self.pulses_o.shape)}")
-            if self.pulses_o.shape[0] != self._x_o.shape[0]:
-                raise ValueError(
-                    f"pulses_o and x_o must have same n_trials, got "
-                    f"{self.pulses_o.shape[0]} vs {self._x_o.shape[0]}"
-                )
-
-        def set_x_o(self, x_o: torch.Tensor):
-            self._x_o = x_o.to("cpu", dtype=torch.float32)
-            return self
-        
-        def set_x(self, x: torch.Tensor):
-            return self.set_x_o(x)
-
-        def return_x_o(self):
-            return self._x_o
-
-        def __call__(self, theta: torch.Tensor, track_gradients: bool = False) -> torch.Tensor:
-            # sbi may pass track_gradients even when using non-gradient samplers
-            with torch.set_grad_enabled(bool(track_gradients)):
-                if theta.ndim == 1:
-                    theta = theta.view(1, -1)
-                if theta.shape[-1] != 5:
-                    raise ValueError(f"Expected theta shape (N,5), got {tuple(theta.shape)}")
-
-                theta = theta.to("cpu", dtype=torch.float32)
-
-                lp = self.prior_theta.log_prob(theta)  # (N,)
-                valid = torch.isfinite(lp)
-                if not torch.any(valid):
-                    return lp
-                
-                theta_valid = theta[valid]
-                Nv = theta_valid.shape[0]
-
-                n_trials = self._x_o.shape[0]
-                P = self.pulses_o.shape[1]
-
-                chunk = 512  # experiment with any 256/512/1024 
-                ll_sum = torch.zeros((Nv,), dtype=torch.float32, device="cpu")
-
-                for t0 in range(0, n_trials, chunk):
-                    t1 = min(t0 + chunk, n_trials)
-                    nt = t1 - t0
-
-                    # (Nv, nt, 5)
-                    theta_rep = theta_valid[:, None, :].expand(Nv, nt, 5)
-                    # (Nv, nt, P)
-                    pulses_rep = self.pulses_o[t0:t1][None, :, :].expand(Nv, nt, P)
-
-                    z = torch.cat([theta_rep, pulses_rep], dim=-1).reshape(Nv * nt, 5 + P)
-                    x = self._x_o[t0:t1][None, :, :].expand(Nv, nt, 2).reshape(Nv * nt, 2)
-
-                    ll_chunk = self.density_estimator.log_prob(x, z).view(Nv, nt).sum(dim=1)
-                    ll_sum += ll_chunk
-
-                out = lp.clone()
-                out[valid] = out[valid] + ll_sum
-
-                return out
-
-
-    # Create the conditioned potential over theta only
-    conditioned_potential_fn = ConditionedPulsePotential(
-        density_estimator=density_estimator,
-        prior_theta=prior_theta,
-        x_o=x_o,
-        pulses_o=pulses_o,
+    # Condition on the observed pulses (must be shape (n_trials, P))
+    conditioned_potential_fn = potential_fn.condition_on_theta(
+        pulses_o,                 # conditions per trial
+        dims_global_theta=[0,1,2,3,4],   # the theta dims inside z
     )
-
-    # ---- MCMC posterior over theta only ----
-    prior_transform = mcmc_transform(prior_theta)
 
     mcmc_kwargs = dict(
         num_chains=1,
@@ -432,14 +362,17 @@ def main():
         num_workers=1,
     )
 
-    posterior = MCMCPosterior(
+    # Posterior over theta only: proposal must be *prior_theta* (not the extended proposal)
+    prior_transform = mcmc_transform(prior_theta)
+
+    mnle_posterior = MCMCPosterior(
         potential_fn=conditioned_potential_fn,
-        proposal=prior_theta,
+        proposal=prior_theta,          # IMPORTANT: prior, not proposal
         theta_transform=prior_transform,
         **mcmc_kwargs,
     )
 
-    samples = posterior.sample((10000,), show_progress_bars=True).detach().cpu()
+    samples = mnle_posterior.sample((10000,), x=x_o, show_progress_bars=True).detach().cpu()
 
     # ---- plot ----
     labels = [r"$a_0$", r"$\lambda$", r"$v$", r"$B$", r"$t_{nd}$"]
