@@ -164,21 +164,11 @@ class ExtendedProposal(Distribution):
 # ----------------------------
 
 def pack_x_rt_choice(rt_choice: torch.Tensor) -> torch.Tensor:
-    """
-    rt_choice: (N,2) with columns [rt, choice] where choice in {0,1,2}.
-    returns x: (N,2) float32 with choice last (still exact integers as floats).
-    """
-    if rt_choice.ndim != 2 or rt_choice.shape[1] != 2:
-        raise ValueError(f"rt_choice must be (N,2), got {tuple(rt_choice.shape)}")
-
     rt = rt_choice[:, 0:1].to(torch.float32)
-    choice_int = rt_choice[:, 1].to(torch.int64)
-
-    if not torch.all((choice_int == 0) | (choice_int == 1) | (choice_int == 2)):
-        raise ValueError(f"choice must be in {{0,1,2}}; found {torch.unique(choice_int).tolist()}")
-
-    x = torch.cat([rt, choice_int.view(-1, 1).to(torch.float32)], dim=1)
-    return x
+    choice_int = rt_choice[:, 1:2].to(torch.int64)   # keep as integer-coded
+    # Log-transform ONLY RT:
+    rt_log = torch.log(rt.clamp_min(1e-6))
+    return torch.cat([rt_log, choice_int.to(torch.float32)], dim=1)
 
 
 # ----------------------------
@@ -319,9 +309,9 @@ def main():
     # Now x = [rt, choice], so log_transform_x=True is appropriate and recommended.
     estimator_builder = likelihood_nn(
         model="mnle",
-        log_transform_x=True,
+        log_transform_x=False,      # IMPORTANT
         z_score_theta="independent",
-        z_score_x=None,  # keep discrete column exact
+        z_score_x=None,
     )
 
     trainer = MNLE(prior=proposal, density_estimator=estimator_builder, device=str(device))
@@ -330,7 +320,7 @@ def main():
     print("Estimator device:", next(density_estimator.parameters()).device)
 
     # ---- observed data ----
-    theta_true = torch.tensor([0.55, 0.2, 1.5, 2.0, 0.25], device=device, dtype=torch.float32)
+    theta_true = torch.tensor([0.55, 0.2, 1.0, 24.0, 0.25], device=device, dtype=torch.float32)
 
     # NOTE: MNLE bias can accumulate over thousands of trials; start smaller and scale up carefully.
     num_trials = 300  # set to 3000 later if you want, but confirm behavior first.
@@ -474,12 +464,12 @@ def main():
         **mcmc_kwargs,
     )
 
-    samples = posterior.sample((300,), show_progress_bars=True).detach().cpu()
+    samples = posterior.sample((10000,), show_progress_bars=True).detach().cpu()
 
     # ---- plot ----
     labels = [r"$a_0$", r"$\lambda$", r"$v$", r"$B$", r"$t_{nd}$"]
     fig, ax = pairplot(
-        [prior_theta.sample((2000,)).detach().cpu(), samples],
+        [prior_theta.sample((10000,)).detach().cpu(), samples],
         points=theta_true.detach().cpu().unsqueeze(0),
         diag="kde",
         upper="kde",
