@@ -25,7 +25,7 @@ def train_mnle(
             thin=5,
             init_strategy="proposal",
         )
-
+    
     theta_train = prior.sample((num_simulations,)).to(torch.float32)
 
     x_train_list = []
@@ -40,11 +40,11 @@ def train_mnle(
     assert torch.isfinite(x_train).all(), "NaN/Inf in x_train."
 
     estimator_builder = likelihood_nn(
-    model="mnle",
-    log_transform_x=True,
-    z_score_theta="independent",
-    z_score_x="independent",
-)
+        model="mnle",
+        log_transform_x=True,
+        z_score_theta="independent",
+        z_score_x="independent",
+    )
 
     trainer = MNLE(prior=prior, density_estimator=estimator_builder)
     trainer.append_simulations(theta_train, x_train, exclude_invalid_x=False)

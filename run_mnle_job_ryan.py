@@ -27,7 +27,6 @@ PULSE_INTERVAL = 0.1  # seconds
 # ----------------------------
 # Prior over global parameters theta = [a0, lam, v, B, tnd]
 # ----------------------------
-
 class JointPrior(Distribution):
     arg_constraints = {}
     has_rsample = False
@@ -123,10 +122,6 @@ class PulseSequenceProposal(Distribution):
             s = s.to(self._device)
         return s
 
-    def log_prob(self, value):
-        # Constant log-prob is OK for a training proposal.
-        return torch.zeros(value.shape[:-1], device=value.device, dtype=torch.float32)
-
 
 class ExtendedProposal(Distribution):
     """
@@ -154,10 +149,12 @@ class ExtendedProposal(Distribution):
         return z
 
     def log_prob(self, z):
-        theta = z[..., :5]
-        pulses = z[..., 5:]
-        return self.theta_prior.log_prob(theta) + self.pulse_proposal.log_prob(pulses)
-
+        raise NotImplementedError(
+            """
+            ExtendedProposal.log_prob is intentionally undefined 
+            because the pulse proposal does not define a density
+            """
+        )
 
 # ----------------------------
 # Pack x for MNLE: x = [rt, choice], with choice LAST (categorical).
@@ -208,16 +205,20 @@ def simulate_training_set_with_conditions(
     p_success: float,
     P: int,
 ):
-    z_all = proposal.sample((num_simulations,)).to(device=device, dtype=torch.float32)
-
+    zs = []
     xs = []
+
     for start in range(0, num_simulations, batch_size):
-        z = z_all[start:start + batch_size]
+        curr_batches = min(batch_size, num_simulations - start)
+
+        z = proposal.sample((curr_batches,)).to(device=device, dtype=torch.float32)
         x = sim_wrapper(z, mu_sensory=mu_sensory, p_success=p_success, P=P)
+
+        zs.append(z.detach().cpu())
         xs.append(x.detach().cpu())
 
+    z_cpu = torch.cat(zs, dim=0).to(torch.float32)
     x_all = torch.cat(xs, dim=0).to(torch.float32)
-    z_cpu = z_all.detach().cpu()
 
     assert torch.isfinite(z_cpu).all()
     assert torch.isfinite(x_all).all()
@@ -306,7 +307,7 @@ def main():
     )
 
     # ---- build & train MNLE ----
-    # Now x = [rt, choice], so log_transform_x=True is appropriate and recommended.
+    # Now x = [rt, choice], so log_transform_x=False is necessary
     estimator_builder = likelihood_nn(
         model="mnle",
         log_transform_x=False,      # IMPORTANT
@@ -357,11 +358,6 @@ def main():
                     f"{self.pulses_o.shape[0]} vs {self._x_o.shape[0]}"
                 )
 
-        # --- REQUIRED by your sbi BasePosterior ---
-        def return_x_o(self):
-            return self._x_o
-
-        # (Optional but often expected in some sbi utilities; safe to include.)
         def set_x_o(self, x_o: torch.Tensor):
             self._x_o = x_o.to("cpu", dtype=torch.float32)
             return self
@@ -369,40 +365,8 @@ def main():
         def set_x(self, x: torch.Tensor):
             return self.set_x_o(x)
 
-    class ConditionedPulsePotential:
-        """
-        Potential for posterior over global theta given observed (x_i, pulses_i).
-        Uses the trained MNLE estimator q_phi(x | z) with z = [theta, pulses_i].
-        """
-
-        def __init__(self, density_estimator, prior_theta, x_o, pulses_o):
-            self.density_estimator = density_estimator.to("cpu")
-            self.prior_theta = prior_theta
-            self._x_o = x_o.to("cpu", dtype=torch.float32)            # store as _x_o
-            self.pulses_o = pulses_o.to("cpu", dtype=torch.float32)
-            self.device = "cpu"  # IMPORTANT: sbi reads potential_fn.device
-
-            if self._x_o.ndim != 2 or self._x_o.shape[1] != 2:
-                raise ValueError(f"x_o must be (n_trials,2), got {tuple(self._x_o.shape)}")
-            if self.pulses_o.ndim != 2:
-                raise ValueError(f"pulses_o must be (n_trials,P), got {tuple(self.pulses_o.shape)}")
-            if self.pulses_o.shape[0] != self._x_o.shape[0]:
-                raise ValueError(
-                    f"pulses_o and x_o must have same n_trials, got "
-                    f"{self.pulses_o.shape[0]} vs {self._x_o.shape[0]}"
-                )
-
-        # --- REQUIRED by your sbi BasePosterior ---
         def return_x_o(self):
             return self._x_o
-
-        # (Optional but often expected in some sbi utilities; safe to include.)
-        def set_x_o(self, x_o: torch.Tensor):
-            self._x_o = x_o.to("cpu", dtype=torch.float32)
-            return self
-        
-        def set_x(self, x: torch.Tensor):
-            return self.set_x_o(x)
 
         def __call__(self, theta: torch.Tensor, track_gradients: bool = False) -> torch.Tensor:
             # sbi may pass track_gradients even when using non-gradient samplers
@@ -418,22 +382,34 @@ def main():
                 valid = torch.isfinite(lp)
                 if not torch.any(valid):
                     return lp
-
+                
                 theta_valid = theta[valid]
                 Nv = theta_valid.shape[0]
+
                 n_trials = self._x_o.shape[0]
                 P = self.pulses_o.shape[1]
 
-                theta_rep = theta_valid[:, None, :].expand(Nv, n_trials, 5)
-                pulses_rep = self.pulses_o[None, :, :].expand(Nv, n_trials, P)
+                chunk = 512  # experiment with any 256/512/1024 
+                ll_sum = torch.zeros((Nv,), dtype=torch.float32, device="cpu")
 
-                z = torch.cat([theta_rep, pulses_rep], dim=-1).reshape(Nv * n_trials, 5 + P)
-                x = self._x_o[None, :, :].expand(Nv, n_trials, 2).reshape(Nv * n_trials, 2)
+                for t0 in range(0, n_trials, chunk):
+                    t1 = min(t0 + chunk, n_trials)
+                    nt = t1 - t0
 
-                ll = self.density_estimator.log_prob(x, z).view(Nv, n_trials).sum(dim=1)
+                    # (Nv, nt, 5)
+                    theta_rep = theta_valid[:, None, :].expand(Nv, nt, 5)
+                    # (Nv, nt, P)
+                    pulses_rep = self.pulses_o[t0:t1][None, :, :].expand(Nv, nt, P)
+
+                    z = torch.cat([theta_rep, pulses_rep], dim=-1).reshape(Nv * nt, 5 + P)
+                    x = self._x_o[t0:t1][None, :, :].expand(Nv, nt, 2).reshape(Nv * nt, 2)
+
+                    ll_chunk = self.density_estimator.log_prob(x, z).view(Nv, nt).sum(dim=1)
+                    ll_sum += ll_chunk
 
                 out = lp.clone()
-                out[valid] = out[valid] + ll
+                out[valid] = out[valid] + ll_sum
+
                 return out
 
 
@@ -444,7 +420,6 @@ def main():
         x_o=x_o,
         pulses_o=pulses_o,
     )
-
 
     # ---- MCMC posterior over theta only ----
     prior_transform = mcmc_transform(prior_theta)
