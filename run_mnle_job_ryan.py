@@ -346,14 +346,18 @@ def main():
         seed=123,
     )
 
-    potential_fn = LikelihoodBasedPotential(estimator, proposal)
+    potential_fn = LikelihoodBasedPotential(
+        estimator=estimator,
+        proposal=proposal,
+        x_o=x_o, 
+    )
 
     # Condition on the observed pulses (must be shape (n_trials, P))
     conditioned_potential_fn = potential_fn.condition_on_theta(
-        pulses_o,                 # conditions per trial
-        dims_global_theta=[0,1,2,3,4],   # the theta dims inside z
+        pulses_o,
+        dims_global_theta=[0,1,2,3,4],
     )
-
+    
     mcmc_kwargs = dict(
         num_chains=1,
         warmup_steps=1200,
