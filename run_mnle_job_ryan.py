@@ -67,6 +67,7 @@ class JointPrior(Distribution):
 
         ok = (
             (a0 >= 0.0) & (a0 <= 1.0) &
+            (lam > 0.0) &
             (v > 0.0) &
             (B > 0.0) &
             (tnd >= 0.0) & (tnd <= 0.9)
