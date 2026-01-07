@@ -34,7 +34,7 @@ MU_SENSORY = 1.0
 P_SUCCESS = 0.75
 
 # Training settings
-NUM_SIMULATIONS = 500_000
+NUM_SIMULATIONS = 1_000_000
 TRAIN_BATCH_SIZE = 4096
 
 # Observed-data settings
@@ -71,7 +71,6 @@ PRIOR_MODE = "wide"
 
 # Whether to use a theta_true drawn from the prior (recommended for pipeline sanity checks).
 THETA_TRUE_FROM_PRIOR = True
-
 
 # ----------------------------
 # Prior over global parameters theta = [a0, lam, v, B, tnd]
@@ -443,6 +442,135 @@ class ThetaConditionedOnPulsesPotential:
 
         return ll
 
+# --- NEW: helper to simulate one SBC dataset ---
+@torch.no_grad()
+def simulate_one_sbc_dataset(
+    theta_true: torch.Tensor,
+    *,
+    num_trials: int,
+    device,
+    mu_sensory: float,
+    p_success: float,
+    P: int,
+    seed: int,
+    log_rt: bool,
+):
+    x_o, pulses_o = simulate_observed_session(
+        theta_true,
+        num_trials=num_trials,
+        device=device,
+        mu_sensory=mu_sensory,
+        p_success=p_success,
+        P=P,
+        seed=seed,
+        log_rt=log_rt,
+    )
+    return x_o, pulses_o
+
+def sbc_manual(
+    *,
+    prior_theta,
+    density_estimator,
+    P: int,
+    simulate_observed_session_fn,
+    mcmc_transform_fn,
+    num_sbc_runs: int = 200,
+    num_trials: int = 50,
+    num_posterior_samples: int = 1000,
+    mu_sensory: float = 1.0,
+    p_success: float = 0.75,
+    log_rt: bool = False,
+    trial_chunk_size: int = 512,
+    temperature: float = 1.0,
+    warmup_steps: int = 600,
+    num_chains: int = 1,
+    device_sim=None,   # DEVICE from your script
+    seed0: int = 12345,
+):
+    """
+    Manual SBC:
+      For i=1..N:
+        theta_i ~ prior
+        (x_i, pulses_i) ~ simulator(theta_i)
+        draw posterior samples theta~p_hat(theta|x_i,pulses_i)
+        rank_i = #{posterior_samples < theta_i} per dim
+    Returns ranks: (N, dim)
+    """
+    dim = 5
+    ranks = torch.empty((num_sbc_runs, dim), dtype=torch.int64)
+
+    theta_transform = mcmc_transform_fn(prior_theta)
+
+    for i in range(num_sbc_runs):
+        # 1) sample theta from prior
+        theta_true = prior_theta.sample((1,)).view(dim).to(torch.float32)
+
+        # 2) simulate dataset
+        x_o, pulses_o = simulate_observed_session_fn(
+            theta_true,
+            num_trials=num_trials,
+            device=device_sim,
+            mu_sensory=mu_sensory,
+            p_success=p_success,
+            P=P,
+            seed=seed0 + i,
+            log_rt=log_rt,
+        )
+
+        # 3) build potential + posterior (your working method)
+        potential = ThetaConditionedOnPulsesPotential(
+            density_estimator=density_estimator,
+            prior_theta=prior_theta,
+            x_o=x_o,
+            pulses_o=pulses_o,
+            trial_chunk_size=trial_chunk_size,
+            temperature=temperature,
+            device="cpu",
+        )
+
+        posterior = MCMCPosterior(
+            potential_fn=potential,
+            proposal=prior_theta,
+            theta_transform=theta_transform,
+            num_chains=num_chains,
+            warmup_steps=warmup_steps,
+            thin=1,
+            init_strategy="prior",
+            num_workers=1,
+        )
+
+        post_samps = posterior.sample((num_posterior_samples,), show_progress_bars=False).detach().cpu()
+
+        # 4) rank statistic per dimension
+        # rank = number of posterior draws less than true value
+        theta_true_cpu = theta_true.detach().cpu()
+        ranks[i] = (post_samps < theta_true_cpu[None, :]).sum(dim=0)
+
+        if (i + 1) % max(1, num_sbc_runs // 10) == 0:
+            print(f"SBC {i+1}/{num_sbc_runs}")
+
+    return ranks
+
+def plot_sbc_ranks(ranks: torch.Tensor, num_posterior_samples: int, num_bins: int = 20):
+    """
+    ranks: (N, dim), each entry in {0,...,num_posterior_samples}
+    Uniform histogram per dim indicates calibration.
+    """
+    ranks = ranks.numpy()
+    N, dim = ranks.shape
+    fig, axes = plt.subplots(1, dim, figsize=(3.2 * dim, 3), sharey=True)
+    if dim == 1:
+        axes = [axes]
+    bins = np.linspace(0, num_posterior_samples, num_bins + 1)
+
+    for d in range(dim):
+        axes[d].hist(ranks[:, d], bins=bins, edgecolor="black")
+        axes[d].set_title(f"param {d} rank")
+        axes[d].set_xlabel("rank")
+    axes[0].set_ylabel("count")
+    plt.tight_layout()
+    plt.show()
+
 
 def main():
     print("Device:", DEVICE)
@@ -594,10 +722,34 @@ def main():
     )
     plt.show()
 
+    # ----------------------------
+    # NEW: Simulation-Based Calibration (SBC)
+    # ----------------------------
+
+    print("\n--- Manual SBC ---")
+    ranks = sbc_manual(
+        prior_theta=prior_theta,
+        density_estimator=density_estimator,
+        P=P,
+        simulate_observed_session_fn=simulate_observed_session,
+        mcmc_transform_fn=mcmc_transform,
+        num_sbc_runs=200,           
+        num_trials=50,
+        num_posterior_samples=500,
+        mu_sensory=MU_SENSORY,
+        p_success=P_SUCCESS,
+        log_rt=LOG_RT_MANUALLY,
+        trial_chunk_size=TRIAL_CHUNK_SIZE,
+        temperature=TEMPERATURE,
+        warmup_steps=400,
+        num_chains=1,
+        device_sim=DEVICE,
+    )
+    plot_sbc_ranks(ranks, num_posterior_samples=500, num_bins=20)
+
     print("\nDone.")
     print("Next step: gradually increase NUM_TRIALS_OBS (e.g., 200 -> 500 -> 1000).")
     print("If posterior becomes unstable as trials increase, that strongly suggests MNLE bias accumulation.")
-
 
 if __name__ == "__main__":
     main()
