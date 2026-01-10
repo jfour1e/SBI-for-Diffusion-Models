@@ -39,7 +39,7 @@ TRAIN_BATCH_SIZE = 4096
 
 # Observed-data settings
 # Start small; likelihood approximation bias can explode when summing over many trials.
-NUM_TRIALS_OBS = 200
+NUM_TRIALS_OBS = 50
 
 # x preprocessing:
 # We recommend log-transforming RT but NOT the categorical choice.
@@ -511,6 +511,11 @@ def main():
         log_transform_x=bool(SBI_LOG_TRANSFORM_X),
         z_score_theta="independent",
         z_score_x=Z_SCORE_X,
+
+        # Expressivity knobs:
+        hidden_features=128,   # was default 50
+        num_transforms=10,     # was default 5 (more “coupling/spline” steps)
+        num_bins=24,           # was default 10 (finer spline)
     )
 
     trainer = MNLE(prior=proposal, density_estimator=estimator_builder, device=str(DEVICE))
