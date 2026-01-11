@@ -14,7 +14,7 @@ from torch.distributions import Distribution
 from sbi.analysis import pairplot
 from sbi.inference import MNLE, MCMCPosterior
 from sbi.inference.potentials.likelihood_based_potential import LikelihoodBasedPotential
-from sbi.utils.get_nn_models import likelihood_nn
+from sbi.neural_nets import likelihood_nn
 from sbi.utils import MultipleIndependent, mcmc_transform
 
 from sbi_for_diffusion_models.rt_choice_model import (
@@ -32,7 +32,7 @@ MU_SENSORY = 1.0
 P_SUCCESS = 0.75
 
 # Training settings
-NUM_SIMULATIONS = 500_000
+NUM_SIMULATIONS = 1_000_000
 TRAIN_BATCH_SIZE = 4096
 
 # Observed-data settings
@@ -260,7 +260,7 @@ class ThetaOnlyPosteriorPotential:
         self.conditioned_loglike = conditioned_loglike
         self.prior_theta = prior_theta
         self._x_o = x_o.to(device=device, dtype=torch.float32)
-        self.device = device  # some sbi paths read potential_fn.device
+        self.device = device
         self.temperature = float(temperature)
 
     def return_x_o(self):
@@ -273,26 +273,91 @@ class ThetaOnlyPosteriorPotential:
     def set_x(self, x: torch.Tensor):
         return self.set_x_o(x)
 
-    def __call__(self, theta: torch.Tensor, track_gradients: bool = True) -> torch.Tensor:
+    def __call__(self, theta: torch.Tensor, x_o: torch.Tensor = None, track_gradients: bool = True) -> torch.Tensor:
+        # IMPORTANT: sbi may call potential(theta, x_o). If provided, update internal x.
+        if x_o is not None:
+            self.set_x_o(x_o)
+
         if theta.ndim == 1:
             theta = theta.view(1, -1)
         theta = theta.to(self.device, dtype=torch.float32)
 
+        # Prior term
         lp = self.prior_theta.log_prob(theta)  # (N,)
         valid = torch.isfinite(lp)
         if not torch.any(valid):
             return lp
 
-        with torch.set_grad_enabled(track_gradients):
+        # Likelihood term (conditioned on pulses via condition_on_theta)
+        with torch.set_grad_enabled(bool(track_gradients)):
             ll = self.conditioned_loglike(
-                theta[valid],
-                x_o=self._x_o,
-                track_gradients=track_gradients,
-            ).reshape(-1)
+                theta[valid], 
+                self._x_o, 
+                track_gradients=bool(track_gradients)).reshape(-1)
 
         out = lp.clone()
         out[valid] = out[valid] + ll / self.temperature
         return out
+
+class ConditionedMNLELogLikelihood(torch.nn.Module):
+    """
+    Pickleable replacement for LikelihoodBasedPotential.condition_on_theta(...).
+
+    Computes sum_i log p(x_i | global_theta, local_theta_i) efficiently
+    by moving iid trials onto the batch dimension of theta, following
+    sbi's _log_likelihood_over_iid_trials_and_local_theta implementation.
+    """
+
+    def __init__(self, estimator, local_theta: torch.Tensor, device: str = "cpu"):
+        super().__init__()
+        self.estimator = estimator
+        self.device = device
+        # store as buffer so it moves with .to(...) and is pickleable
+        self.register_buffer("local_theta", local_theta.to(device=device, dtype=torch.float32))
+
+    def forward(
+        self,
+        global_theta: torch.Tensor,  # (N, 5)
+        x_o: torch.Tensor,           # (num_trials, 2) or (num_trials, 1, 2)
+        track_gradients: bool = True,
+    ) -> torch.Tensor:
+        global_theta = global_theta.to(self.device, dtype=torch.float32)
+        x_o = x_o.to(self.device, dtype=torch.float32)
+
+        # Ensure x has shape (num_trials, num_xs=1, event_dim=2)
+        if x_o.dim() == 2:
+            x = x_o.unsqueeze(1)  # (T,1,2)
+        else:
+            x = x_o
+
+        num_trials, num_xs = x.shape[:2]
+        assert num_xs == 1, "This implementation supports a single observed x batch (num_xs=1)."
+        assert self.local_theta.shape[0] == num_trials, (
+            f"local_theta must have shape (num_trials, P). Got {tuple(self.local_theta.shape)}"
+        )
+
+        num_thetas = global_theta.shape[0]
+
+        # Following sbi: move iid trials onto batch dim of theta and repeat there
+        # x_repeated shape: (1, num_trials*num_thetas, 2)
+        x_repeated = torch.transpose(x, 0, 1).repeat_interleave(num_thetas, dim=1)
+
+        # Build condition tensor [global_theta, local_theta_i] for each trial-theta pair
+        # theta_with_condition shape: (num_trials*num_thetas, 5+P)
+        theta_with_condition = torch.cat(
+            [
+                global_theta.repeat(num_trials, 1),                      # ABAB...
+                self.local_theta.repeat_interleave(num_thetas, dim=0),   # AABB...
+            ],
+            dim=-1,
+        )
+
+        with torch.set_grad_enabled(bool(track_gradients)):
+            ll_batch = self.estimator.log_prob(x_repeated, condition=theta_with_condition)
+            # reshape to (num_xs=1, num_trials, num_thetas) and sum over trials
+            ll_sum = ll_batch.reshape(num_xs, num_trials, num_thetas).sum(1).squeeze(0)
+
+        return ll_sum  # (num_thetas,)
 
 
 def main():
@@ -312,12 +377,14 @@ def main():
             LogNormal(torch.tensor([-1.0]), torch.tensor([1.0])),  # lam
             LogNormal(torch.tensor([0.0]), torch.tensor([1.0])),  # v
             LogNormal(torch.tensor([2.75]), torch.tensor([0.5])),  # B
-            TransformedDistribution(
-                base_distribution=Beta(torch.tensor([2.0]), torch.tensor([5.0])),
-                transforms=[AffineTransform(loc=torch.tensor([0.0]), scale=torch.tensor([0.9]))],
+            Beta(torch.tensor([2.0]), torch.tensor([2.0])
             ),  # p_lapse in [0,0.9]
         ]
     )
+
+                #TransformedDistribution(
+                #base_distribution=Beta(torch.tensor([2.0]), torch.tensor([5.0])),
+                #transforms=[AffineTransform(loc=torch.tensor([0.0]), scale=torch.tensor([0.9]))]
 
     # Training proposal over z=[theta,pulses]
     pulse_prop = PulseSequenceProposal(P=P, p_success=P_SUCCESS, seed=0, device="cpu")
@@ -386,8 +453,10 @@ def main():
     dims_global_theta = list(range(5))
 
     # Condition on the known pulse sequence for each trial.
-    conditioned_loglike = base_potential.condition_on_theta(
-        local_theta=pulses_o, dims_global_theta=dims_global_theta
+    conditioned_loglike = ConditionedMNLELogLikelihood(
+        estimator=density_estimator,
+        local_theta=pulses_o,   # (num_trials, P)
+        device="cpu",
     )
 
     # Add log prior(theta) manually. condition_on_theta returns likelihood only.
@@ -405,15 +474,17 @@ def main():
         potential_fn=potential_theta,
         proposal=prior_theta,
         theta_transform=theta_transform,
+        method="nuts_pyro",
         num_chains=NUM_CHAINS,
         warmup_steps=WARMUP_STEPS,
         thin=1,
-        init_strategy="prior",
+        init_strategy="proposal",
         num_workers=1,
     )
 
     print("\n--- Sampling posterior over theta ---")
-    samples = posterior.sample((POSTERIOR_SAMPLES,), show_progress_bars=True).detach().cpu()
+    samples = (posterior.sample((POSTERIOR_SAMPLES,), x=x_o, show_progress_bars=True).detach().cpu())
+
 
     # Plots and diagnostics
     outdir = os.environ.get("OUTDIR", "mnle_outputs")
