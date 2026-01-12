@@ -7,9 +7,9 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .constants import T_MAX, PULSE_INTERVAL, DT_CHOICE
-from .defaults import DEFAULT_P_SUCCESS
-
+from ..constants import T_MAX, PULSE_INTERVAL, DT_CHOICE
+from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, RunConfig
+cfg = RUN_CONFIG_PARAMS
 
 @dataclass(frozen=True)
 class ChoiceModelParams:
@@ -44,7 +44,7 @@ def generate_pulse_sides(
     rng: np.random.Generator,
     n_pulses: int,
     *,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
 ) -> np.ndarray:
     """
     Returns s_seq shape (n_pulses,), values +/-1.
@@ -194,7 +194,7 @@ def choice_model_simulator(
     rng: np.random.Generator,
     *,
     mu_sensory: float = 1.0,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
 ) -> int:
     """
     Single-trial NumPy API. Returns {-1,0,1}.
@@ -216,7 +216,7 @@ def choice_model_simulator_torch(
     rng: np.random.Generator | None = None,
     *,
     mu_sensory: float = 1.0,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
     resample_invalid: bool = False,
     max_resamples: int = 50,
 ) -> Tensor:

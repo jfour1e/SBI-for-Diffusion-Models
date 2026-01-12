@@ -1,146 +1,89 @@
 from __future__ import annotations
+
 import torch
-from torch import Tensor
-import sys, os
+from sbi.inference import MNLE, MCMCPosterior
+from sbi.neural_nets import likelihood_nn
+from sbi.utils import mcmc_transform
 
-import sbi.neural_nets as nn
-from sbi.inference import MNLE
-from sbi.analysis import pairplot
-import matplotlib.pyplot as plt
-from sbi.utils.get_nn_models import likelihood_nn
+from sbi_for_diffusion_models.potentials import ThetaOnlyPosteriorPotential, ConditionedMNLELogLikelihood
 
-from sbi_for_diffusion_models.ddm_simulator import pulse_ddm_simulator_torch, simulate_session_data
+def train_mnle(cfg, proposal_z, z_train, x_train, device: str = "cpu"):
+    """
+    Train an MNLE density estimator on simulations (z_train, x_train).
 
-def train_mnle(
-    prior,
-    num_simulations: int = 10_000,
-    simulation_batch_size: int = 512,
-    mcmc_kwargs: dict | None = None,
-    **sim_kwargs, 
-):
-    if mcmc_kwargs is None:
-        mcmc_kwargs = dict(
-            num_chains=20,
-            warmup_steps=200,
-            thin=5,
-            init_strategy="proposal",
-        )
-    
-    theta_train = prior.sample((num_simulations,)).to(torch.float32)
+    Args:
+        cfg: RunConfig (or any object with the required attributes)
+        proposal_z: distribution over z = [theta, pulses]
+        z_train: (N, 5+P) tensor
+        x_train: (N, 2) tensor
+        device: "cpu" or "cuda"
 
-    x_train_list = []
-    for start in range(0, num_simulations, simulation_batch_size):
-        batch = theta_train[start:start + simulation_batch_size]
-        x_batch = pulse_ddm_simulator_torch(batch, **sim_kwargs) 
-        x_train_list.append(x_batch)
+    Returns:
+        density_estimator: trained conditional density estimator
+    """
 
-    x_train = torch.cat(x_train_list, dim=0).to(torch.float32)
-
-    assert torch.isfinite(theta_train).all(), "NaN/Inf in theta_train."
-    assert torch.isfinite(x_train).all(), "NaN/Inf in x_train."
-
-    estimator_builder = likelihood_nn(
+    est_builder = likelihood_nn(
         model="mnle",
-        log_transform_x=True,
+        log_transform_x=bool(cfg.SBI_LOG_TRANSFORM_X),
         z_score_theta="independent",
-        z_score_x="independent",
+        z_score_x=cfg.Z_SCORE_X,
+        hidden_features=128,
+        num_transforms=10,
+        num_bins=24,
     )
 
-    trainer = MNLE(prior=prior, density_estimator=estimator_builder)
-    trainer.append_simulations(theta_train, x_train, exclude_invalid_x=False)
-    trainer.train()
+    trainer = MNLE(prior=proposal_z, density_estimator=est_builder, device=device)
+    trainer = trainer.append_simulations(z_train, x_train)
 
-    posterior = trainer.build_posterior(
-        prior=prior,
-        mcmc_method="slice_np_vectorized",
-        mcmc_parameters=mcmc_kwargs,
+    # sbi changed arg name across versions
+    try:
+        density_estimator = trainer.train(training_batch_size=cfg.TRAIN_BATCH_SIZE)
+    except TypeError:
+        density_estimator = trainer.train(batch_size=cfg.TRAIN_BATCH_SIZE)
+
+    return density_estimator
+
+def run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o) -> torch.Tensor:
+    """
+    Runs MCMC over global theta (dim=5) conditioned on trial-wise pulses_o,
+    using an MNLE density_estimator trained on z=[theta,pulses].
+
+    Returns:
+        samples: (cfg.POSTERIOR_SAMPLES, 5) on CPU
+    """
+
+    conditioned_loglike = ConditionedMNLELogLikelihood(
+        estimator=density_estimator,
+        local_theta=pulses_o,
+        device="cpu",
     )
 
-    return posterior, trainer
+    potential_theta = ThetaOnlyPosteriorPotential(
+        conditioned_loglike=conditioned_loglike,
+        prior_theta=prior_theta,
+        x_o=x_o,
+        device="cpu",
+        temperature=cfg.TEMPERATURE,
+    )
 
+    theta_transform = mcmc_transform(prior_theta)
 
-def run_parameter_recovery(
-    prior,
-    num_simulations=50_000,
-    num_trials_session=200,
-    num_posterior_samples=5_000,
-    theta_true=None,
-    mu_sensory: float = 1.0,
-):
-    """
-    Train once, simulate one synthetic dataset, sample posterior, plot pairplot.
-    """
-    mcmc_kwargs = dict(
-        method="slice_np_vectorized",
-        warmup_steps=200,
-        thin=5,
-        num_chains=20,
+    posterior = MCMCPosterior(
+        potential_fn=potential_theta,
+        proposal=prior_theta,
+        theta_transform=theta_transform,
+        method="nuts_pyro",
+        num_chains=cfg.NUM_CHAINS,
+        warmup_steps=cfg.WARMUP_STEPS,
+        thin=1,
         init_strategy="proposal",
+        num_workers=1,
     )
 
-    posterior, trainer = train_mnle(
-        prior,
-        num_simulations=num_simulations,
-        mu_sensory=mu_sensory,    
-    )
-
-    if theta_true is None:
-        theta_true = torch.tensor(
-            [0.5, 0.4, 1.0, 2.0, 0.2, 0.2, 0.15],  # [bias, lam, nu, B, sigma_a, t_nd, sigma_s]
-            dtype=torch.float32
-        )
-
-    x_o = simulate_session_data(theta_true, num_trials_session, mu_sensory=mu_sensory)
-
-    # ---- Sampling from MCMCPosterior: pass kwargs here (works across versions)
-    posterior_samples = posterior.sample(
-        sample_shape=(num_posterior_samples,),
+    samples = posterior.sample(
+        (cfg.POSTERIOR_SAMPLES,),
         x=x_o,
-        **mcmc_kwargs,
-    )
+        show_progress_bars=True,
+    ).detach().cpu()
 
-    labels = [r"bias", r"$\lambda$", r"$\nu$", r"$B$", r"$\sigma_a$", r"$t_{nd}$", r"$\sigma_s$"]
-
-    fig, ax = pairplot(
-        [prior.sample((2000,)), posterior_samples],
-        points=theta_true.unsqueeze(0),
-        diag="kde",
-        upper="kde",
-        labels=labels,
-    )
-    plt.suptitle("Parameter Recovery: MNLE posterior vs prior", fontsize=14)
-    plt.show()
-
-    return theta_true, x_o, posterior, posterior_samples, trainer
-
-
-def plot_empirical_rt_choice(x_o: torch.Tensor, title: str = "Observed data"):
-    x_np = x_o.detach().cpu().numpy()
-    rt = x_np[:, 0]
-    choice = x_np[:, 1]
-    p_right = choice.mean()
-
-    fig, axes = plt.subplots(1, 2, figsize=(8, 3))
-    axes[0].hist(rt, bins=30, alpha=0.8)
-    axes[0].set_xlabel("RT (s)")
-    axes[0].set_ylabel("Count")
-    axes[0].set_title(f"{title}: RT distribution")
-
-    axes[1].bar(["Left", "Right"], [1.0 - p_right, p_right])
-    axes[1].set_ylim(0, 1)
-    axes[1].set_title(f"{title}: choice proportions")
-
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_posterior_marginals(posterior_samples: torch.Tensor):
-    labels = [r"bias", r"$\lambda$", r"$\nu$", r"$B$", r"$\sigma_a$", r"$t_{nd}$", r"$\sigma_s$"]
-    s = posterior_samples.detach().cpu().numpy()
-
-    fig, axes = plt.subplots(1, s.shape[1], figsize=(3.0 * s.shape[1], 3))
-    for i in range(s.shape[1]):
-        axes[i].hist(s[:, i], bins=30, alpha=0.8)
-        axes[i].set_title(labels[i])
-    plt.tight_layout()
-    plt.show()
+    return samples

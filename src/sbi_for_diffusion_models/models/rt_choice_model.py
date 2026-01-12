@@ -7,10 +7,10 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from .constants import T_MAX, PULSE_INTERVAL, DT_CHOICE
-from .defaults import DEFAULT_P_SUCCESS
+from ..constants import T_MAX, PULSE_INTERVAL, DT_CHOICE
 from .choice_model import generate_pulse_sides
-
+from ..run_config import RUN_CONFIG_PARAMS, RunConfig
+cfg = RUN_CONFIG_PARAMS
 
 @dataclass(frozen=True)
 class RTChoiceModelParams:
@@ -64,7 +64,7 @@ def generate_pulse_matrix_numpy(
     n_trials: int,
     n_pulses: int,
     *,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
 ) -> np.ndarray:
     """
     Generate a realized pulse-side matrix s with shape (n_trials, n_pulses), values in {+1,-1}.
@@ -114,7 +114,7 @@ def _simulate_rt_choice_batch_torch(
     *,
     mu_sensory: float,
     pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
     rng: Optional[np.random.Generator] = None,
 ) -> Tensor:
     """
@@ -227,7 +227,7 @@ def rt_choice_model_simulator(
     *,
     mu_sensory: float = 1.0,
     pulse_sides: Optional[Union[np.ndarray, Tensor]] = None,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
 ) -> tuple[float, int]:
     """
     Single-trial NumPy API.
@@ -254,7 +254,7 @@ def rt_choice_model_simulator_torch(
     *,
     mu_sensory: float = 1.0,
     pulse_sides: Optional[Union[np.ndarray, Tensor]] = None,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
 ) -> Tensor:
     """
     SBI-friendly simulator.
@@ -290,7 +290,7 @@ def simulate_session_data_rt_choice(
     *,
     mu_sensory: float = 1.0,
     pulse_sides: Optional[Union[np.ndarray, Tensor]] = None,
-    p_success: float = DEFAULT_P_SUCCESS,
+    p_success: float = cfg.P_SUCCESS,
     return_pulse_sides: bool = False,
 ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
     """
@@ -327,3 +327,16 @@ def simulate_session_data_rt_choice(
         s_t = as_pulse_tensor(pulse_sides, device=x.device, dtype=torch.float32)
         return x, s_t
     return x
+
+# helper functions
+def pack_x_rt_choice(rt_choice: torch.Tensor, *, log_rt: bool) -> torch.Tensor:
+    """
+    MNLE expects x to contain continuous component(s) and then a discrete/categorical
+    component in the last dimension. We keep choice values in {0,1,2} and store as float,
+    but we do *not* apply log to choice.
+    """
+    rt = rt_choice[:, 0:1].to(torch.float32).clamp_min(1e-6)
+    if log_rt:
+        rt = torch.log(rt)
+    choice = rt_choice[:, 1:2].to(torch.int64)
+    return torch.cat([rt, choice.to(torch.float32)], dim=1)
