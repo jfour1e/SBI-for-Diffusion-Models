@@ -76,12 +76,24 @@ def main():
     print("\n--- Training MNLE ---")
     density_estimator = train_mnle(cfg, proposal_z, z_train, x_train, device="cpu")
 
+    # Save Neural Network to directory
+    model_dir = os.path.expanduser("~/models")
+    os.makedirs(model_dir, exist_ok=True)
+    model_path = os.path.join(model_dir, "mnle_rt_choice.pt")
+
+    torch.save({
+        "state_dict": density_estimator.state_dict(),
+        "config": cfg,
+    }, model_path)
+
+    print("Saved MNLE model to:", model_path)
+
     # Simulate observed session data
     if cfg.THETA_TRUE_FROM_PRIOR:
         theta_true = prior_theta.sample((1,)).view(5)
     else:
         raise ValueError("Set THETA_TRUE_FROM_PRIOR=True or provide your own theta_true.")
-    
+
     x_o, pulses_o = simulate_observed_session(
         theta_true,
         num_trials=cfg.NUM_TRIALS_OBS,
@@ -96,6 +108,14 @@ def main():
     print("theta_true:", theta_true.detach().cpu().numpy().round(4).tolist())
 
     # Inference 
+    """
+    For Inference only MCMC, load the saved model: 
+
+    checkpoint = torch.load(model_path, map_location="cpu")
+    density_estimator = est_builder
+    density_estimator.load_state_dict(checkpoint["state_dict"])
+    density_estimator.eval()
+    """
     print("\n--- Sampling posterior over theta ---")
     samples = run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o)
 
