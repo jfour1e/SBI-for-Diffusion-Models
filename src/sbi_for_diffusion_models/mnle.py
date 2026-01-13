@@ -12,7 +12,6 @@ from sbi.utils import mcmc_transform
 
 from sbi_for_diffusion_models.potentials import ThetaOnlyPosteriorPotential, ConditionedMNLELogLikelihood
 from sbi_for_diffusion_models.models.rt_choice_model import simulate_session_data_rt_choice
-from sbi_for_diffusion_models.mnle import run_inference_mcmc
 
 def train_mnle(cfg, proposal_z, z_train, x_train, device: str = "cpu"):
     """
