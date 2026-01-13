@@ -17,7 +17,7 @@ from sbi_for_diffusion_models.models.rt_choice_model import (
     pulse_schedule,
     n_pulses_max_from_schedule,
 )
-from sbi_for_diffusion_models.mnle import train_mnle, run_inference_mcmc
+from sbi_for_diffusion_models.mnle import train_mnle, run_inference_mcmc, run_sbc
 from sbi_for_diffusion_models.data_simulator import (
     simulate_observed_session, 
     simulate_training_set_with_conditions, 
@@ -118,6 +118,24 @@ def main():
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("Saved:", fig_path)
+
+    # Run SBC
+    print("\n--- Running SBC ---")
+
+    sbc_outdir = os.path.join(outdir, "sbc")
+
+    run_sbc(
+        cfg,
+        prior_theta=prior_theta,
+        density_estimator=density_estimator,
+        device="cpu",
+        num_datasets=cfg.SBC_NUM_DATASETS,
+        posterior_samples_per_dataset=cfg.SBC_POST_SAMPLES,
+        seed=0,
+        param_names=("a0", "lam", "v", "B", "tau"),
+        outdir=sbc_outdir,
+        plot_bins=30,
+    )
 
 if __name__ == "__main__":
     main()

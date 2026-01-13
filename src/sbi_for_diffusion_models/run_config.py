@@ -27,7 +27,7 @@ class RunConfig:
     # MCMC settings
     NUM_CHAINS: int = 2
     WARMUP_STEPS: int = 100
-    POSTERIOR_SAMPLES: int = 1_000
+    POSTERIOR_SAMPLES: int = 1000
 
     """
     Optional likelihood tempering for debugging only (1.0 = true posterior).
@@ -35,5 +35,10 @@ class RunConfig:
     """
     TEMPERATURE: float = 1.0
     THETA_TRUE_FROM_PRIOR: bool = True
+
+    # SBC settings 
+    SBC_NUM_DATASETS: int = 10 
+    SBC_POST_SAMPLES: int = 1500
+
 
 RUN_CONFIG_PARAMS = RunConfig()
