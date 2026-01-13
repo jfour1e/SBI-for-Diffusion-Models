@@ -5,7 +5,6 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-# Avoid expensive distribution argument checks in tight loops.
 torch.distributions.Distribution.set_default_validate_args(False)
 
 from torch.distributions import Beta, LogNormal, Distribution
@@ -23,13 +22,13 @@ from sbi_for_diffusion_models.data_simulator import (
     simulate_training_set_with_conditions, 
     summarize_trials
 )
-from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, RunConfig
+from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 cfg = RUN_CONFIG_PARAMS
 
 # -------------
 # Utilities 
 # -------------
-def build_prior_theta(device: str = "cpu") -> Distribution:
+def build_prior_theta() -> Distribution:
     """
     Prior over theta = [a0, lam, v, B, tau].
     """
@@ -53,7 +52,7 @@ def main():
     print("P =", P, "pulses per trial")
 
     # prior over Theta 
-    prior_theta = build_prior_theta(device="cpu")
+    prior_theta = build_prior_theta()
 
     # Training proposal over z=[theta,pulses]
     pulse_prop = PulseSequenceProposal(P=P, p_success=cfg.P_SUCCESS, seed=0, device="cpu")

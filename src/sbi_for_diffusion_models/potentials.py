@@ -3,7 +3,6 @@ import numpy as np
 import torch
 from torch.distributions import Distribution
 
-
 # Posterior potential over theta only (adds log prior; conditioned loglike is likelihood only).
 class ThetaOnlyPosteriorPotential:
     def __init__(

@@ -9,7 +9,7 @@ from torch import Tensor
 
 from ..constants import T_MAX, PULSE_INTERVAL, DT_CHOICE
 from .choice_model import generate_pulse_sides
-from ..run_config import RUN_CONFIG_PARAMS, RunConfig
+from ..run_config import RUN_CONFIG_PARAMS
 cfg = RUN_CONFIG_PARAMS
 
 @dataclass(frozen=True)

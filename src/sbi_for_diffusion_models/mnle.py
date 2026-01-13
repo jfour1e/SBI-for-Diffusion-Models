@@ -182,11 +182,10 @@ def run_sbc(
     all_samples = []
 
     for i in range(num_datasets):
-        # 1) theta_true ~ prior
+        # simulate theta_true from prior
         theta_true = prior_theta.sample((1,)).view(5).to(torch.float32).cpu()
 
-        # 2) simulate observed dataset (x_o, pulses_o) using your existing function
-        # Important: pass a dataset-specific rng to ensure pulses differ each iteration
+        # simulate observed dataset
         ds_seed = int(rng.integers(0, 2**31 - 1))
         ds_rng = np.random.default_rng(ds_seed)
 
@@ -198,10 +197,7 @@ def run_sbc(
             p_success=float(cfg.P_SUCCESS),
             return_pulse_sides=True,
         )
-        # x_raw is (T,2) [rt, choice]; your inference code expects packed x if you used packing in training
-        # In your current pipeline: training uses pack_x_rt_choice after sim, and observed uses pack_x_rt_choice too.
-        # simulate_session_data_rt_choice returns already [rt, choice] in same format (float32; choice 0/1/2),
-        # which matches your pack format when LOG_RT_MANUALLY=False. If LOG_RT_MANUALLY=True, you'd need to log rt here.
+
         x_o = x_raw.detach().cpu().to(torch.float32)
 
         if bool(cfg.LOG_RT_MANUALLY):
@@ -210,10 +206,10 @@ def run_sbc(
 
         pulses_o = pulses_o.detach().cpu().to(torch.float32)
 
-        # 3) infer posterior samples
+        # infer posterior samples
         samples = run_inference_mcmc(cfg_for_inference, prior_theta, density_estimator, x_o, pulses_o)  # (S,5)
 
-        # 4) ranks
+        # compute ranks
         r = _compute_ranks(theta_true, samples)
 
         thetas_true.append(theta_true.numpy())
@@ -225,7 +221,7 @@ def run_sbc(
     thetas_true = np.stack(thetas_true, axis=0)
     ranks = np.stack(ranks, axis=0)
 
-    # Save
+    # Save sbc results
     np.save(os.path.join(outdir, "sbc_thetas_true.npy"), thetas_true)
     np.save(os.path.join(outdir, "sbc_ranks.npy"), ranks)
     print("Saved:", os.path.join(outdir, "sbc_thetas_true.npy"))
