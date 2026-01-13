@@ -6,9 +6,10 @@ requires-python = ">=3.10"
 dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.2.6",
+    "numpyro>=0.19.0",
     "pandas>=2.3.3",
-    "sbi>=0.22.0",
-    "torch>=2.9.1",
+    "sbi>=0.25.0",
+    "torch<2.6.0",
 ]
 
 [build-system]
