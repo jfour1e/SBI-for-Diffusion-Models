@@ -235,3 +235,63 @@ def run_sbc(
     )
 
     return {"thetas_true": thetas_true, "ranks": ranks, "all_samples": all_samples}
+
+# Neural network saving/loading functions 
+
+def _model_dir():
+    path = os.path.expanduser("~/models")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def save_model(density_estimator, cfg, name: str = "mnle_rt_choice_model.pt"):
+    path = os.path.join(_model_dir(), name)
+
+    torch.save(
+        {
+            "state_dict": density_estimator.state_dict(),
+            "config": cfg,
+        },
+        path,
+    )
+
+    print(f"[Model] Saved MNLE network to: {path}")
+    return path
+
+
+def load_model(cfg, proposal_z, *, name: str = "mnle_rt_choice.pt", device: str = "cpu"):
+    path = os.path.join(_model_dir(), name)
+    if not os.path.exists(path):
+        print(f"[Model] No saved model found at {path}. Train first.")
+        return None
+    
+    est_builder = likelihood_nn(
+        model="mnle",
+        log_transform_x=bool(cfg.SBI_LOG_TRANSFORM_X),
+        z_score_theta="independent",
+        z_score_x=cfg.Z_SCORE_X,
+        hidden_features=128,
+        num_transforms=10,
+        num_bins=24,
+    )
+
+    # Create MNLE wrapper
+    trainer = MNLE(prior=proposal_z, density_estimator=est_builder, device=device)
+
+    if hasattr(trainer, "density_estimator"):
+        density_estimator = trainer.density_estimator
+    elif hasattr(trainer, "_density_estimator"):
+        density_estimator = trainer._density_estimator
+    else:
+        density_estimator = est_builder
+
+    # Load checkpoint
+    ckpt = torch.load(path, map_location=device)
+    state_dict = ckpt.get("state_dict", ckpt)  # allow saving raw state_dict too
+    density_estimator.load_state_dict(state_dict)
+
+    density_estimator.to(device)
+    density_estimator.eval()
+
+    print(f"[Model] Loaded MNLE network from: {path}")
+    return density_estimator

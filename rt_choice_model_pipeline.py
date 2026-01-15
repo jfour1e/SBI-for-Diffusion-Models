@@ -16,7 +16,10 @@ from sbi_for_diffusion_models.models.rt_choice_model import (
     pulse_schedule,
     n_pulses_max_from_schedule,
 )
-from sbi_for_diffusion_models.mnle import train_mnle, run_inference_mcmc, run_sbc
+from sbi_for_diffusion_models.mnle import (
+    train_mnle, run_inference_mcmc, run_sbc, 
+    _model_dir, save_model, load_model
+)
 from sbi_for_diffusion_models.data_simulator import (
     simulate_observed_session, 
     simulate_training_set_with_conditions, 
@@ -77,16 +80,7 @@ def main():
     density_estimator = train_mnle(cfg, proposal_z, z_train, x_train, device="cpu")
 
     # Save Neural Network to directory
-    model_dir = os.path.expanduser("~/models")
-    os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, "mnle_rt_choice.pt")
-
-    torch.save({
-        "state_dict": density_estimator.state_dict(),
-        "config": cfg,
-    }, model_path)
-
-    print("Saved MNLE model to:", model_path)
+    save_model(density_estimator, cfg)
 
     # Simulate observed session data
     if cfg.THETA_TRUE_FROM_PRIOR:
@@ -111,10 +105,9 @@ def main():
     """
     For Inference only MCMC, load the saved model: 
 
-    checkpoint = torch.load(model_path, map_location="cpu")
-    density_estimator = est_builder
-    density_estimator.load_state_dict(checkpoint["state_dict"])
-    density_estimator.eval()
+    density_estimator = load_model(cfg, proposal_z, device="cpu")
+    if density_estimator is None:
+        raise RuntimeError("No saved MNLE model found. Train first.")
     """
     print("\n--- Sampling posterior over theta ---")
     samples = run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o)
