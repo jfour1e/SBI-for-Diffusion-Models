@@ -63,7 +63,7 @@ summarize_trials("train (sample)", x_train[torch.randperm(len(x_train))[:50_000]
 ```python 
 density_estimator = train_mnle(cfg, proposal_z, z_train, x_train, device="cpu")
 
-# Save trained neural network (still working on function for this)
+# Save trained neural network for later use, Can use keyword name='model_trained.pt' for custom name
 save_model(density_estimator, cfg)
 
 # Simulate Observed Session 
@@ -83,7 +83,7 @@ x_o, pulses_o = simulate_observed_session(
 
 3. Inference ONLY, load saved model: 
 ```python 
-# Working on function for this too 
+# Load previously trained model. Can pass in name='model_name.pt' for custom model loading 
 density_estimator = load_model(cfg, proposal_z, device="cpu")
 
 # run Inference - can be done after training or in isolation 

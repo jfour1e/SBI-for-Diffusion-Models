@@ -23,4 +23,5 @@ packages = ["src/sbi_for_diffusion_models"]
 dev = [
     "ipykernel>=7.1.0",
     "jupyter>=1.1.1",
+    "pytest>=9.0.2",
 ]

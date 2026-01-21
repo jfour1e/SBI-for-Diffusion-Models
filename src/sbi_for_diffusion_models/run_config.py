@@ -25,9 +25,9 @@ class RunConfig:
     Z_SCORE_X: str | None = "independent"
 
     # MCMC settings
-    NUM_CHAINS: int = 2
+    NUM_CHAINS: int = 1
     WARMUP_STEPS: int = 100
-    POSTERIOR_SAMPLES: int = 1000
+    POSTERIOR_SAMPLES: int = 900
 
     """
     Optional likelihood tempering for debugging only (1.0 = true posterior).
@@ -37,8 +37,8 @@ class RunConfig:
     THETA_TRUE_FROM_PRIOR: bool = True
 
     # SBC settings 
-    SBC_NUM_DATASETS: int = 10 
-    SBC_POST_SAMPLES: int = 1500
+    SBC_NUM_DATASETS: int = 5 
+    SBC_POST_SAMPLES: int = 200
 
 
 RUN_CONFIG_PARAMS = RunConfig()
