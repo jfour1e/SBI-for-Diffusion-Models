@@ -5,11 +5,13 @@ from typing import Optional, Sequence
 import numpy as np
 import matplotlib.pyplot as plt 
 import torch
+import tracemalloc
 
 from sbi.inference import MNLE, MCMCPosterior
 from sbi.neural_nets import likelihood_nn
 from sbi.utils import mcmc_transform
 
+from profile_utils import profile_block
 from sbi_for_diffusion_models.potentials import ThetaOnlyPosteriorPotential, ConditionedMNLELogLikelihood
 from sbi_for_diffusion_models.models.rt_choice_model import simulate_session_data_rt_choice
 
@@ -50,50 +52,46 @@ def train_mnle(cfg, proposal_z, z_train, x_train, device: str = "cpu"):
     return density_estimator
 
 def run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o) -> torch.Tensor:
-    """
-    Runs MCMC over global theta (dim=5) conditioned on trial-wise pulses_o,
-    using an MNLE density_estimator trained on z=[theta,pulses].
+    from sbi.inference import MCMCPosterior
+    from sbi.utils import mcmc_transform
 
-    Returns:
-        samples: (cfg.POSTERIOR_SAMPLES, 5) on CPU
-    """
+    with profile_block("run_inference_mcmc: setup"):
+        conditioned_loglike = ConditionedMNLELogLikelihood(
+            estimator=density_estimator,
+            local_theta=pulses_o,
+            device="cpu",
+        )
 
-    conditioned_loglike = ConditionedMNLELogLikelihood(
-        estimator=density_estimator,
-        local_theta=pulses_o,
-        device="cpu",
-    )
+        potential_theta = ThetaOnlyPosteriorPotential(
+            conditioned_loglike=conditioned_loglike,
+            prior_theta=prior_theta,
+            x_o=x_o,
+            device="cpu",
+            temperature=cfg.TEMPERATURE,
+        )
 
-    potential_theta = ThetaOnlyPosteriorPotential(
-        conditioned_loglike=conditioned_loglike,
-        prior_theta=prior_theta,
-        x_o=x_o,
-        device="cpu",
-        temperature=cfg.TEMPERATURE,
-    )
+        theta_transform = mcmc_transform(prior_theta)
 
-    theta_transform = mcmc_transform(prior_theta)
+        posterior = MCMCPosterior(
+            potential_fn=potential_theta,
+            proposal=prior_theta,
+            theta_transform=theta_transform,
+            method="nuts_pyro",
+            num_chains=cfg.NUM_CHAINS,
+            warmup_steps=cfg.WARMUP_STEPS,
+            thin=1,
+            init_strategy="proposal",
+            num_workers=1,
+        )
 
-    posterior = MCMCPosterior(
-        potential_fn=potential_theta,
-        proposal=prior_theta,
-        theta_transform=theta_transform,
-        method="nuts_pyro",
-        num_chains=cfg.NUM_CHAINS,
-        warmup_steps=cfg.WARMUP_STEPS,
-        thin=1,
-        init_strategy="proposal",
-        num_workers=1,
-    )
-
-    samples = posterior.sample(
-        (cfg.POSTERIOR_SAMPLES,),
-        x=x_o,
-        show_progress_bars=True,
-    ).detach().cpu()
+    with profile_block("run_inference_mcmc: posterior.sample()"):
+        samples = posterior.sample(
+            (cfg.POSTERIOR_SAMPLES,),
+            x=x_o,
+            show_progress_bars=True,
+        ).detach().cpu()
 
     return samples
-
 
 def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
     """
