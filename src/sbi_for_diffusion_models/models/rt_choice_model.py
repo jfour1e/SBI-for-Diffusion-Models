@@ -59,6 +59,11 @@ def n_pulses_max_from_schedule(n_max: int, steps_per_pulse: int) -> int:
     return (int(n_max) + int(steps_per_pulse) - 1) // int(steps_per_pulse)
 
 
+def max_num_pulses() -> int:
+    """Maximum number of pulses in a trial of duration T_MAX."""
+    return int(float(T_MAX) / float(PULSE_INTERVAL))
+
+
 def generate_pulse_matrix_numpy(
     rng: np.random.Generator,
     n_trials: int,
@@ -84,11 +89,12 @@ def generate_pulse_matrix_numpy(
         raise ValueError("n_trials must be >= 0")
     if n_pulses < 0:
         raise ValueError("n_pulses must be >= 0")
+    if n_trials == 0 or n_pulses == 0:
+        return np.empty((n_trials, n_pulses), dtype=np.float32)
 
-    s = np.empty((n_trials, n_pulses), dtype=np.float32)
-    for i in range(n_trials):
-        s[i, :] = generate_pulse_sides(rng, n_pulses, p_success=p_success)
-    return s
+    correct_side = np.where(rng.random(n_trials) < 0.5, 1.0, -1.0)
+    is_correct = rng.random((n_trials, n_pulses)) < p_success
+    return np.where(is_correct, correct_side[:, None], -correct_side[:, None]).astype(np.float32)
 
 
 def as_pulse_tensor(
@@ -109,6 +115,101 @@ def as_pulse_tensor(
     return s.to(device=device, dtype=dtype)
 
 
+def _ou_transition_params(
+    lam: Tensor, dt: float, sigma: float,
+) -> Tuple[Tensor, Tensor]:
+    """Exact OU decay and noise-std for a step of size *dt*."""
+    decay = torch.exp(-lam * dt)
+    two_lam_dt = 2.0 * lam * dt
+    var_factor = torch.where(
+        lam.abs() < 1e-8,
+        torch.full_like(lam, dt),
+        (1.0 - torch.exp(-two_lam_dt)) / (2.0 * lam),
+    )
+    noise_std = sigma * torch.sqrt(var_factor.clamp_min(1e-30))
+    return decay, noise_std
+
+
+def _run_coarse_ou_loop(
+    a0_frac: Tensor,
+    v: Tensor,
+    B: Tensor,
+    decay: Tensor,
+    noise_std: Tensor,
+    s: Tensor,
+    n_intervals: Tensor,
+    P_max: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """
+    Coarse pass: one exact OU step per pulse interval (~80 iterations).
+
+    Returns
+    -------
+    hit : (N,) bool
+    choice : (N,) int64, 0=lower 1=upper
+    hit_interval : (N,) int64, 1-based interval index of first crossing
+    a_before_hit : (N,) float, accumulator at START of crossing interval
+    hit_from_pulse : (N,) bool, True when the pulse kick caused the crossing
+    """
+    N = a0_frac.shape[0]
+
+    a = a0_frac * B
+    hit = torch.zeros(N, dtype=torch.bool, device=device)
+    choice = torch.zeros(N, dtype=torch.int64, device=device)
+    hit_interval = torch.zeros(N, dtype=torch.int64, device=device)
+    a_before_hit = torch.zeros(N, dtype=dtype, device=device)
+    hit_from_pulse = torch.zeros(N, dtype=torch.bool, device=device)
+
+    all_noise = torch.randn((P_max, N), device=device, dtype=dtype)
+
+    for k in range(P_max):
+        active = (~hit) & (k < n_intervals)
+        if not torch.any(active):
+            break
+
+        a_prev = a.clone()
+
+        # --- exact OU step for one full pulse interval ---
+        a = torch.where(active, a * decay + noise_std * all_noise[k], a)
+
+        # boundary check after OU step
+        hit_upper = active & (a >= B)
+        hit_lower = active & (a <= 0.0)
+        newly_hit = hit_upper | hit_lower
+        if torch.any(newly_hit):
+            hit_interval = torch.where(newly_hit, torch.full_like(hit_interval, k + 1), hit_interval)
+            choice = torch.where(hit_upper, torch.ones_like(choice), choice)
+            choice = torch.where(hit_lower, torch.zeros_like(choice), choice)
+            a_before_hit = torch.where(newly_hit, a_prev, a_before_hit)
+            hit_from_pulse = torch.where(newly_hit, torch.zeros_like(hit_from_pulse), hit_from_pulse)
+            hit = hit | newly_hit
+
+        # --- pulse kick (pulse k arrives at time (k+1)*delta) ---
+        still_active = (~hit) & (k < n_intervals)
+        if torch.any(still_active):
+            a = torch.where(still_active, a + v * s[:, k], a)
+
+            hit_upper = still_active & (a >= B)
+            hit_lower = still_active & (a <= 0.0)
+            newly_hit = hit_upper | hit_lower
+            if torch.any(newly_hit):
+                hit_interval = torch.where(newly_hit, torch.full_like(hit_interval, k + 1), hit_interval)
+                choice = torch.where(hit_upper, torch.ones_like(choice), choice)
+                choice = torch.where(hit_lower, torch.zeros_like(choice), choice)
+                a_before_hit = torch.where(newly_hit, a_prev, a_before_hit)
+                hit_from_pulse = torch.where(newly_hit, torch.ones_like(hit_from_pulse), hit_from_pulse)
+                hit = hit | newly_hit
+
+    return hit, choice, hit_interval, a_before_hit, hit_from_pulse
+
+
+# Refinement sub-steps used only inside the single crossing interval.
+# resolution = PULSE_INTERVAL / _DEFAULT_N_REFINE  (default 0.1 ms)
+_DEFAULT_N_REFINE = 1000
+
+
 def _simulate_rt_choice_batch_torch(
     theta: Tensor,
     *,
@@ -116,108 +217,166 @@ def _simulate_rt_choice_batch_torch(
     pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
     p_success: float = cfg.P_SUCCESS,
     rng: Optional[np.random.Generator] = None,
+    max_resamples: int = 100,
+    n_refine: int = _DEFAULT_N_REFINE,
 ) -> Tensor:
     """
-    theta: (N,5) torch tensor on CPU or GPU
-    returns: (N,2) float32 tensor: [rt, choice] where choice in {0,1,2}
-            (2 denotes censoring / no-bound-hit within the decision window)
+    Batch simulator using adaptive-resolution exact OU transitions.
+
+    1. **Coarse pass** (~80 iterations): one exact OU step per pulse
+       interval to identify *which* interval each trial crosses in.
+    2. **Refinement** (n_refine iterations, only for the crossing
+       interval): re-simulate that single interval at high resolution
+       to pinpoint the crossing time.
+
+    Timeout trials are resampled with fresh noise until every trial
+    produces a decision.
+
+    Parameters
+    ----------
+    n_refine : int
+        Sub-steps used to refine the crossing interval.
+        RT resolution = PULSE_INTERVAL / n_refine  (default 0.1 ms).
+
+    theta : (N, 5)  [a0_frac, lam, v, B, t_nd]
+    returns : (N, 2)  [rt, choice]  with choice in {0, 1}
     """
     device = theta.device
     dtype = torch.float32
     theta = theta.to(dtype=dtype)
 
     N = theta.shape[0]
-
     a0_frac = theta[:, 0].clamp(0.0, 1.0)
     lam = theta[:, 1]
     v = theta[:, 2].abs()
     B = theta[:, 3].abs().clamp_min(1e-6)
     t_nd = theta[:, 4].clamp(0.0, float(T_MAX) - 1e-6)
 
-    dt = float(DT_CHOICE)
-    n_max, steps_per_pulse = pulse_schedule(dt=dt)
-
-    # Decision window per trial in steps
-    n_steps = torch.floor((float(T_MAX) - t_nd) / dt).to(torch.int64).clamp(0, n_max)
-
-    # Start point in [0,B]
-    a = a0_frac * B
-
+    delta = float(PULSE_INTERVAL)
     sigma = float(mu_sensory)
-    sqrt_dt = np.sqrt(dt)
+    P_max = max_num_pulses()
 
-    # Outcomes
-    hit = torch.zeros((N,), dtype=torch.bool, device=device)
-    choice = torch.zeros((N,), dtype=torch.int64, device=device)
-    hit_step = torch.zeros((N,), dtype=torch.int64, device=device)  # first crossing step (>=1)
+    # decision window in full pulse intervals
+    n_intervals = torch.floor((float(T_MAX) - t_nd) / delta).to(torch.int64).clamp(0, P_max)
 
-    # Pulse sides: either provided (conditioning) or generated here (marginalizing stimulus).
-    n_pulses_max = n_pulses_max_from_schedule(n_max, steps_per_pulse)
+    # coarse OU params (one full pulse interval)
+    decay_coarse, noise_std_coarse = _ou_transition_params(lam, delta, sigma)
 
+    # pulse sides
     if pulse_sides is None:
-        # NOTE: This path *integrates out* stimulus by sampling it internally.
-        # For conditioning on a realized stimulus, generate `pulse_sides` externally and pass it in.
         if rng is None:
             rng = np.random.default_rng()
-        s_np = generate_pulse_matrix_numpy(rng, N, n_pulses_max, p_success=p_success)
+        s_np = generate_pulse_matrix_numpy(rng, N, P_max, p_success=p_success)
         s = torch.from_numpy(s_np).to(device=device, dtype=dtype)
     else:
         s = as_pulse_tensor(pulse_sides, device=device, dtype=dtype)
         if s.shape[0] == 1 and N > 1:
-            # allow broadcasting a single stimulus across a batch
             s = s.expand(N, -1)
         if s.shape[0] != N:
             raise ValueError(
-                f"pulse_sides first dim must match batch size N={N} (or be 1 for broadcast), got {s.shape[0]}"
+                f"pulse_sides first dim must match batch size N={N} "
+                f"(or be 1 for broadcast), got {s.shape[0]}"
             )
-        if s.shape[1] < n_pulses_max:
+        if s.shape[1] < P_max:
             raise ValueError(
-                f"pulse_sides has P={s.shape[1]} pulses but simulator needs at least {n_pulses_max} for T_MAX={T_MAX}s"
+                f"pulse_sides has P={s.shape[1]} pulses but simulator "
+                f"needs at least {P_max} for T_MAX={T_MAX}s"
             )
-        # If provided longer than needed, ignore the tail for safety.
-        s = s[:, :n_pulses_max]
+        s = s[:, :P_max]
 
-    # Time loop
-    for t in range(n_max):
-        active = (~hit) & (t < n_steps)
-        if not torch.any(active):
-            break
+    # ---- coarse pass ----
+    hit, choice, hit_interval, a_before_hit, hit_from_pulse = _run_coarse_ou_loop(
+        a0_frac, v, B, decay_coarse, noise_std_coarse, s,
+        n_intervals, P_max, device, dtype,
+    )
 
-        noise = torch.randn((N,), device=device, dtype=dtype) * (sigma * sqrt_dt)
-        a = a + (-lam * a) * dt + noise
-
-        # Pulse kick
-        if (t % steps_per_pulse) == 0:
-            p_idx = t // steps_per_pulse
-            a = a + v * s[:, p_idx] * active.to(dtype)
-
-        # Bound crossing
-        hit_upper = active & (a >= B)
-        hit_lower = active & (a <= 0.0)
-        newly_hit = hit_upper | hit_lower
-
-        if torch.any(newly_hit):
-            # record first hit time (step index is t+1 because we updated a at this step)
-            hit_step = torch.where(newly_hit, torch.full_like(hit_step, t + 1), hit_step)
-            choice = torch.where(hit_upper, torch.ones_like(choice), choice)
-            choice = torch.where(hit_lower, torch.zeros_like(choice), choice)
-            hit = hit | newly_hit
-
-    outcome = choice.clone()  # for hits this is already 0/1
-
+    # ---- resample timeout trials (same theta + pulses, fresh noise) ----
     not_hit = ~hit
+    for _ in range(max_resamples):
+        if not torch.any(not_hit):
+            break
+        idx = torch.where(not_hit)[0]
+        h, c, hi, abh, hfp = _run_coarse_ou_loop(
+            a0_frac[idx], v[idx], B[idx],
+            decay_coarse[idx], noise_std_coarse[idx], s[idx],
+            n_intervals[idx], P_max, device, dtype,
+        )
+        hit[idx] = h
+        choice[idx] = c
+        hit_interval[idx] = hi
+        a_before_hit[idx] = abh
+        hit_from_pulse[idx] = hfp
+        not_hit = ~hit
+
+    # fallback for any remaining timeouts
     if torch.any(not_hit):
-        # censoring time in steps (decision window length)
-        end_step = torch.clamp(n_steps, min=0)
-        hit_step = torch.where(not_hit, end_step, hit_step)
+        n_left = not_hit.sum().item()
+        print(f"Warning: {n_left} trials still timed out after {max_resamples} resamples.")
+        choice[not_hit] = torch.randint(0, 2, (n_left,), device=device)
+        hit_interval[not_hit] = n_intervals[not_hit]
 
-        # mark invalid trials as category 2
-        outcome = torch.where(not_hit, torch.full_like(outcome, 2), outcome)
+    # ---- compute decision time ----
+    # default: crossing at the end of the interval (used for pulse-kick
+    # crossings and as the fallback for timeouts)
+    decision_time = hit_interval.to(dtype) * delta
 
-    # RT always defined (hit time or censoring time) + non-decision time
-    rt = (t_nd + hit_step.to(dtype) * dt).clamp(1e-6, float(T_MAX))
+    # ---- refine OU-step crossings ----
+    ou_mask = hit & (~hit_from_pulse)
+    if torch.any(ou_mask) and n_refine > 1:
+        idx = torch.where(ou_mask)[0]
+        M = idx.shape[0]
+        k_cross = hit_interval[idx] - 1          # 0-based interval index
 
-    x = torch.stack([rt.to(dtype), outcome.to(dtype)], dim=-1)  # (N,2)
+        # per-trial pulse kick for this interval
+        pulse_val = v[idx] * s[idx, k_cross]
+
+        # fine OU params
+        sub_delta = delta / n_refine
+        decay_fine, noise_std_fine = _ou_transition_params(lam[idx], sub_delta, sigma)
+
+        a_r = a_before_hit[idx].clone()
+        hit_r = torch.zeros(M, dtype=torch.bool, device=device)
+        choice_r = torch.zeros(M, dtype=torch.int64, device=device)
+        hit_substep = torch.full((M,), n_refine, dtype=torch.int64, device=device)
+
+        ref_noise = torch.randn((n_refine, M), device=device, dtype=dtype)
+
+        for t in range(n_refine):
+            active_r = ~hit_r
+            if not torch.any(active_r):
+                break
+
+            a_r = torch.where(active_r, a_r * decay_fine + noise_std_fine * ref_noise[t], a_r)
+
+            hit_upper = active_r & (a_r >= B[idx])
+            hit_lower = active_r & (a_r <= 0.0)
+            newly_hit = hit_upper | hit_lower
+            if torch.any(newly_hit):
+                hit_substep = torch.where(newly_hit, torch.full_like(hit_substep, t + 1), hit_substep)
+                choice_r = torch.where(hit_upper, torch.ones_like(choice_r), choice_r)
+                choice_r = torch.where(hit_lower, torch.zeros_like(choice_r), choice_r)
+                hit_r = hit_r | newly_hit
+
+        # apply pulse for trials still active after all OU sub-steps
+        still_active = ~hit_r
+        if torch.any(still_active):
+            a_r = torch.where(still_active, a_r + pulse_val, a_r)
+            hit_upper = still_active & (a_r >= B[idx])
+            hit_lower = still_active & (a_r <= 0.0)
+            newly_hit = hit_upper | hit_lower
+            if torch.any(newly_hit):
+                hit_substep = torch.where(newly_hit, torch.full_like(hit_substep, n_refine), hit_substep)
+                choice_r = torch.where(hit_upper, torch.ones_like(choice_r), choice_r)
+                choice_r = torch.where(hit_lower, torch.zeros_like(choice_r), choice_r)
+                hit_r = hit_r | newly_hit
+
+        # write back refined decision times and choices
+        decision_time[idx] = k_cross.to(dtype) * delta + hit_substep.to(dtype) * sub_delta
+        choice[idx[hit_r]] = choice_r[hit_r]
+
+    # RT = non-decision time + decision time
+    rt = (t_nd + decision_time).clamp(1e-6, float(T_MAX))
+    x = torch.stack([rt, choice.to(dtype)], dim=-1)
     return x
 
 
@@ -263,7 +422,7 @@ def rt_choice_model_simulator_torch(
       theta: (batch,5) or (5,) torch tensor
 
     Output:
-      x: (batch,2) float32 tensor with columns [rt, choice] where choice in {0.,1.,2.}.
+      x: (batch,2) float32 tensor with columns [rt, choice] where choice in {0.,1.}.
 
     Conditioning on stimulus:
       Provide `pulse_sides` with shape (batch,P) (or (P,) / (1,P) to broadcast).
@@ -310,8 +469,7 @@ def simulate_session_data_rt_choice(
 
     # If not provided, we generate stimulus *outside* the simulator body (still marginal unless you save it).
     if pulse_sides is None:
-        n_max, steps_per_pulse = pulse_schedule(dt=float(DT_CHOICE))
-        P = n_pulses_max_from_schedule(n_max, steps_per_pulse)
+        P = max_num_pulses()
         s_np = generate_pulse_matrix_numpy(rng, num_trials, P, p_success=p_success)
         pulse_sides = s_np
 
@@ -332,8 +490,7 @@ def simulate_session_data_rt_choice(
 def pack_x_rt_choice(rt_choice: torch.Tensor, *, log_rt: bool) -> torch.Tensor:
     """
     MNLE expects x to contain continuous component(s) and then a discrete/categorical
-    component in the last dimension. We keep choice values in {0,1,2} and store as float,
-    but we do *not* apply log to choice.
+    component in the last dimension. Choice values are in {0,1} stored as float.
     """
     rt = rt_choice[:, 0:1].to(torch.float32).clamp_min(1e-6)
     if log_rt:

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os 
+import os
 from typing import Optional, Sequence
 import numpy as np
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 import torch
 
 from sbi.inference import MNLE, MCMCPosterior
@@ -12,6 +12,7 @@ from sbi.utils import mcmc_transform
 
 from sbi_for_diffusion_models.potentials import ThetaOnlyPosteriorPotential, ConditionedMNLELogLikelihood
 from sbi_for_diffusion_models.models.rt_choice_model import simulate_session_data_rt_choice
+
 
 def train_mnle(cfg, proposal_z, z_train, x_train, device: str = "cpu"):
     """
@@ -58,10 +59,18 @@ def run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o) -> to
         samples: (cfg.POSTERIOR_SAMPLES, 5) on CPU
     """
 
+    compute_device = "cuda" if torch.cuda.is_available() else "cpu"
+    method = getattr(cfg, "MCMC_METHOD", "slice_np_vectorized")
+
+    print(
+        f"MCMC: method={method}, MNLE device={compute_device}, "
+        f"chains={cfg.NUM_CHAINS}, warmup={cfg.WARMUP_STEPS}"
+    )
+
     conditioned_loglike = ConditionedMNLELogLikelihood(
         estimator=density_estimator,
         local_theta=pulses_o,
-        device="cpu",
+        device=compute_device,
     )
 
     potential_theta = ThetaOnlyPosteriorPotential(
@@ -78,7 +87,7 @@ def run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o) -> to
         potential_fn=potential_theta,
         proposal=prior_theta,
         theta_transform=theta_transform,
-        method="nuts_pyro",
+        method=method,
         num_chains=cfg.NUM_CHAINS,
         warmup_steps=cfg.WARMUP_STEPS,
         thin=1,

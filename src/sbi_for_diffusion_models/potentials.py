@@ -3,6 +3,19 @@ import numpy as np
 import torch
 from torch.distributions import Distribution
 
+
+def _deep_to_device(module: torch.nn.Module, device: str) -> None:
+    """
+    Recursively move ALL tensors in *module* to *device*, including plain
+    tensor attributes that aren't registered as parameters or buffers
+    (e.g. z-scoring mean/std in some sbi versions).
+    """
+    target = torch.device(device)
+    for m in module.modules():
+        for key, val in list(m.__dict__.items()):
+            if isinstance(val, torch.Tensor) and val.device != target:
+                setattr(m, key, val.to(target))
+
 # Posterior potential over theta only (adds log prior; conditioned loglike is likelihood only).
 class ThetaOnlyPosteriorPotential:
     def __init__(
@@ -30,27 +43,33 @@ class ThetaOnlyPosteriorPotential:
     def set_x(self, x: torch.Tensor):
         return self.set_x_o(x)
 
-    def __call__(self, theta: torch.Tensor, x_o: torch.Tensor = None, track_gradients: bool = True) -> torch.Tensor:
+    def __call__(self, theta: torch.Tensor, x_o: torch.Tensor = None, track_gradients: bool = None) -> torch.Tensor:
         # IMPORTANT: sbi may call potential(theta, x_o). If provided, update internal x.
         if x_o is not None:
             self.set_x_o(x_o)
+
+        # Default: respect the ambient grad context.
+        if track_gradients is None:
+            track_gradients = torch.is_grad_enabled()
 
         if theta.ndim == 1:
             theta = theta.view(1, -1)
         theta = theta.to(self.device, dtype=torch.float32)
 
         # Prior term
-        lp = self.prior_theta.log_prob(theta)  # (N,)
+        with torch.set_grad_enabled(track_gradients):
+            lp = self.prior_theta.log_prob(theta)  # (N,)
         valid = torch.isfinite(lp)
         if not torch.any(valid):
             return lp
 
         # Likelihood term (conditioned on pulses via condition_on_theta)
-        with torch.set_grad_enabled(bool(track_gradients)):
+        with torch.set_grad_enabled(track_gradients):
             ll = self.conditioned_loglike(
-                theta[valid], 
-                self._x_o, 
-                track_gradients=bool(track_gradients)).reshape(-1)
+                theta[valid],
+                self._x_o,
+                track_gradients=track_gradients).reshape(-1)
+            ll = ll.to(self.device)  # estimator may live on a different device
 
         out = lp.clone()
         out[valid] = out[valid] + ll / self.temperature
@@ -67,8 +86,10 @@ class ConditionedMNLELogLikelihood(torch.nn.Module):
 
     def __init__(self, estimator, local_theta: torch.Tensor, device: str = "cpu"):
         super().__init__()
-        self.estimator = estimator
         self.device = device
+        self.estimator = estimator.to(device)
+        _deep_to_device(self.estimator, device)   # catch non-buffer tensors (z-score stats etc.)
+        self.estimator.eval()
         # store as buffer so it moves with .to(...) and is pickleable
         self.register_buffer("local_theta", local_theta.to(device=device, dtype=torch.float32))
 
@@ -76,8 +97,12 @@ class ConditionedMNLELogLikelihood(torch.nn.Module):
         self,
         global_theta: torch.Tensor,  # (N, 5)
         x_o: torch.Tensor,           # (num_trials, 2) or (num_trials, 1, 2)
-        track_gradients: bool = True,
+        track_gradients: bool = None,
     ) -> torch.Tensor:
+        # Default: respect the ambient grad context.
+        if track_gradients is None:
+            track_gradients = torch.is_grad_enabled()
+
         global_theta = global_theta.to(self.device, dtype=torch.float32)
         x_o = x_o.to(self.device, dtype=torch.float32)
 
@@ -109,10 +134,10 @@ class ConditionedMNLELogLikelihood(torch.nn.Module):
             dim=-1,
         )
 
-        with torch.set_grad_enabled(bool(track_gradients)):
+        with torch.set_grad_enabled(track_gradients):
             ll_batch = self.estimator.log_prob(x_repeated, condition=theta_with_condition)
             # reshape to (num_xs=1, num_trials, num_thetas) and sum over trials
             ll_sum = ll_batch.reshape(num_xs, num_trials, num_thetas).sum(1).squeeze(0)
 
-        return ll_sum  # (num_thetas,)
+        return ll_sum  # (num_thetas,) - stay on self.device; caller handles transfer
 

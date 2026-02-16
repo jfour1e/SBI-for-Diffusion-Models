@@ -10,63 +10,60 @@ torch.distributions.Distribution.set_default_validate_args(False)
 from sbi.analysis import pairplot
 
 from sbi_for_diffusion_models.priors import build_prior_theta
-from sbi_for_diffusion_models.proposals import PulseSequenceProposal, ExtendedProposal
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
-from sbi_for_diffusion_models.mnle import train_mnle, run_inference_mcmc, run_sbc
+from sbi_for_diffusion_models.mnpe import train_npe_session, run_inference_npe, run_sbc_npe
 from sbi_for_diffusion_models.data_simulator import (
+    simulate_training_sessions,
     simulate_observed_session,
-    simulate_training_set_with_conditions,
-    summarize_trials
+    flatten_observed_session,
+    summarize_trials,
 )
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
+
 cfg = RUN_CONFIG_PARAMS
+
 
 def main():
     torch.manual_seed(0)
     np.random.seed(0)
 
-    # Determine pulse length P from time discretization
     P = max_num_pulses()
-    print("P =", P, "pulses per trial")
+    trial_dim = 2 + P
+    print(f"P = {P} pulses per trial, trial_dim = {trial_dim}")
 
-    # prior over Theta 
     prior_theta = build_prior_theta()
 
-    # Training proposal over z=[theta,pulses]
-    pulse_prop = PulseSequenceProposal(P=P, p_success=cfg.P_SUCCESS, seed=0, device="cpu")
-    proposal_z = ExtendedProposal(theta_prior=prior_theta, pulse_proposal=pulse_prop, device="cpu")
-
-    # simualte training set
-    print("\n--- Simulating training set ---")
-    z_train, x_train = simulate_training_set_with_conditions(
-        proposal=proposal_z,
-        num_simulations=cfg.NUM_SIMULATIONS,
-        batch_size=cfg.TRAIN_BATCH_SIZE,
-        device="cpu",
+    # ── 1. Simulate session-level training data ──
+    print("\n--- Simulating training sessions ---")
+    theta_train, x_train = simulate_training_sessions(
+        prior_theta=prior_theta,
+        num_sessions=cfg.NPE_NUM_SESSIONS,
+        num_trials=cfg.NUM_TRIALS_OBS,
         mu_sensory=cfg.MU_SENSORY,
         p_success=cfg.P_SUCCESS,
         P=P,
         log_rt=cfg.LOG_RT_MANUALLY,
+        seed=0,
     )
-    summarize_trials("train (sample)", x_train[torch.randperm(len(x_train))[:50_000]])
 
-    # Train MNLE
-    print("\n--- Training MNLE ---")
-    density_estimator = train_mnle(cfg, proposal_z, z_train, x_train, device="cpu")
+    # ── 2. Train NPE with permutation-invariant embedding ──
+    print("\n--- Training NPE ---")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    density_estimator, inference_obj = train_npe_session(
+        cfg, prior_theta, theta_train, x_train, device=device,
+    )
 
-    # Save Neural Network to directory
+    # Save model
     model_dir = os.path.expanduser("~/models")
     os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, "mnle_rt_choice.pt")
-
+    model_path = os.path.join(model_dir, "npe_rt_choice.pt")
     torch.save({
         "state_dict": density_estimator.state_dict(),
         "config": cfg,
     }, model_path)
+    print("Saved NPE model to:", model_path)
 
-    print("Saved MNLE model to:", model_path)
-
-    # Simulate observed session data
+    # ── 3. Simulate observed session ──
     if cfg.THETA_TRUE_FROM_PRIOR:
         theta_true = prior_theta.sample((1,)).view(5)
     else:
@@ -85,22 +82,17 @@ def main():
     summarize_trials("observed", x_o)
     print("theta_true:", theta_true.detach().cpu().numpy().round(4).tolist())
 
-    # Inference 
-    """
-    For Inference only MCMC, load the saved model: 
+    # ── 4. Direct posterior sampling (no MCMC) ──
+    x_o_flat = flatten_observed_session(x_o, pulses_o)
+    print(f"\nFlattened observation shape: {tuple(x_o_flat.shape)}")
 
-    checkpoint = torch.load(model_path, map_location="cpu")
-    density_estimator = est_builder
-    density_estimator.load_state_dict(checkpoint["state_dict"])
-    density_estimator.eval()
-    """
-    print("\n--- Sampling posterior over theta ---")
-    samples = run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o)
+    print("\n--- Sampling posterior (direct, no MCMC) ---")
+    samples = run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta)
 
-    # Save outputs
-    outdir = os.environ.get("OUTDIR", "mnle_outputs")
+    # ── 5. Save outputs ──
+    outdir = os.environ.get("OUTDIR", "npe_outputs")
     os.makedirs(outdir, exist_ok=True)
-   
+
     npy_path = os.path.join(outdir, "posterior_samples_theta.npy")
     np.save(npy_path, samples.numpy())
     print("Saved:", npy_path)
@@ -116,23 +108,22 @@ def main():
     plt.close(fig)
     print("Saved:", fig_path)
 
-    # # Run SBC
+    # ── 6. SBC (optional — uncomment to run) ──
     # print("\n--- Running SBC ---")
-
-    # sbc_outdir = os.path.join(outdir, "sbc")
-
-    # run_sbc(
+    # run_sbc_npe(
     #     cfg,
     #     prior_theta=prior_theta,
+    #     inference_obj=inference_obj,
     #     density_estimator=density_estimator,
     #     device="cpu",
-    #     num_datasets=cfg.SBC_NUM_DATASETS,
-    #     posterior_samples_per_dataset=cfg.SBC_POST_SAMPLES,
+    #     num_datasets=cfg.NPE_SBC_NUM_DATASETS,
+    #     posterior_samples_per_dataset=cfg.NPE_SBC_POST_SAMPLES,
     #     seed=0,
     #     param_names=("a0", "lam", "v", "B", "tau"),
-    #     outdir=sbc_outdir,
+    #     outdir=os.path.join(outdir, "sbc"),
     #     plot_bins=30,
     # )
+
 
 if __name__ == "__main__":
     main()
