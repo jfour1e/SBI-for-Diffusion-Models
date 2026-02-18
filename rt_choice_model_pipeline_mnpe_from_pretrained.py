@@ -14,7 +14,7 @@ from sbi.neural_nets import posterior_nn
 
 from sbi_for_diffusion_models.priors import build_prior_theta
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
-from sbi_for_diffusion_models.mnpe import SessionEmbeddingNet
+from sbi_for_diffusion_models.mnpe import SessionEmbeddingNet, run_sbc_npe
 from sbi_for_diffusion_models.data_simulator import (
     simulate_observed_session,
     flatten_observed_session,
@@ -146,6 +146,22 @@ def main():
     fig.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print("Saved:", fig_path)
+
+    # ── 6. SBC ──
+    print("\n--- Running SBC ---")
+    sbc_outdir = os.path.join(outdir, "sbc")
+    run_sbc_npe(
+        saved_cfg,
+        prior_theta=prior_theta,
+        posterior=posterior,
+        device=device,
+        num_datasets=saved_cfg.NPE_SBC_NUM_DATASETS,
+        posterior_samples_per_dataset=saved_cfg.NPE_SBC_POST_SAMPLES,
+        seed=0,
+        param_names=("a0", "lam", "v", "B", "tau"),
+        outdir=sbc_outdir,
+        plot_bins=30,
+    )
 
 
 if __name__ == "__main__":

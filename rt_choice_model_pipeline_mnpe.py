@@ -109,13 +109,15 @@ def main():
     print("Saved:", fig_path)
 
     # ── 6. SBC (optional — uncomment to run) ──
+    # posterior_obj = inference_obj.build_posterior(
+    #     density_estimator=density_estimator, prior=prior_theta,
+    # )
     # print("\n--- Running SBC ---")
     # run_sbc_npe(
     #     cfg,
     #     prior_theta=prior_theta,
-    #     inference_obj=inference_obj,
-    #     density_estimator=density_estimator,
-    #     device="cpu",
+    #     posterior=posterior_obj,
+    #     device=device,
     #     num_datasets=cfg.NPE_SBC_NUM_DATASETS,
     #     posterior_samples_per_dataset=cfg.NPE_SBC_POST_SAMPLES,
     #     seed=0,

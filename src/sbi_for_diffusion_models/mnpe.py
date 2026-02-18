@@ -174,8 +174,7 @@ def run_sbc_npe(
     cfg,
     *,
     prior_theta,
-    inference_obj,
-    density_estimator,
+    posterior,
     device: str = "cpu",
     num_datasets: int = 100,
     posterior_samples_per_dataset: Optional[int] = None,
@@ -184,13 +183,12 @@ def run_sbc_npe(
     outdir: str = "sbc_npe_outputs",
     plot_bins: int = 30,
 ) -> dict:
-    """SBC for the NPE pipeline (no MCMC — fast)."""
-    os.makedirs(outdir, exist_ok=True)
+    """SBC for the NPE pipeline (no MCMC — fast).
 
-    posterior = inference_obj.build_posterior(
-        density_estimator=density_estimator,
-        prior=prior_theta,
-    )
+    Args:
+        posterior: a ready-to-sample posterior (DirectPosterior or equivalent).
+    """
+    os.makedirs(outdir, exist_ok=True)
 
     S = posterior_samples_per_dataset or cfg.NPE_SBC_POST_SAMPLES
     P = max_num_pulses()
@@ -203,7 +201,7 @@ def run_sbc_npe(
     all_samples = []
 
     for i in range(num_datasets):
-        theta_true = prior_theta.sample((1,)).view(5).to(torch.float32)
+        theta_true = prior_theta.sample((1,)).view(5).to(torch.float32).cpu()
 
         ds_seed = int(rng.integers(0, 2**31 - 1))
         ds_rng = np.random.default_rng(ds_seed)
@@ -218,7 +216,7 @@ def run_sbc_npe(
         )
         x_packed = pack_x_rt_choice(x_raw, log_rt=bool(cfg.LOG_RT_MANUALLY))
         x_o_flat = flatten_observed_session(x_packed, pulses_o)
-        x_o_flat = x_o_flat.to(next(density_estimator.parameters()).device)
+        x_o_flat = x_o_flat.to(device)
 
         samples = posterior.sample(
             (S,), x=x_o_flat, show_progress_bars=False,
