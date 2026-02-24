@@ -7,8 +7,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from ..constants import T_MAX, PULSE_INTERVAL, DT_CHOICE
-from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
+from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, T_MAX, PULSE_INTERVAL, DT_CHOICE
 cfg = RUN_CONFIG_PARAMS
 
 @dataclass(frozen=True)

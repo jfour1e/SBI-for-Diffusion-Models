@@ -1,45 +1,26 @@
 from __future__ import annotations
 from dataclasses import dataclass 
 
+# defines constants used in the SBI for Diffusion Models project
+DT = 1e-6
+DT_CHOICE = 5e-4
+T_MAX = 8.0
+PULSE_INTERVAL = 0.27 # in seconds (i.e., 270 ms)
+
+# Refinement sub-steps used only inside the single crossing interval.
+# resolution = PULSE_INTERVAL / _DEFAULT_N_REFINE  (default 0.1 ms)
+_DEFAULT_N_REFINE = 1000
+
 @dataclass(frozen=True)
 class RunConfig:
     # Data / simulator settings
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.75
-
-    # Training settings
-    NUM_SIMULATIONS: int = 100_000
-    TRAIN_BATCH_SIZE: int = 4096
-
-    # Start small
     NUM_TRIALS_OBS : int = 1000
 
     # We recommend log-transforming RT but NOT the categorical choice.
     LOG_RT_MANUALLY: bool = False
-
-    """
-    If your sbi version supports log_transform_x for MNLE (log RT but not choice),
-    you can set LOG_RT_MANUALLY=False and SBI_LOG_TRANSFORM_X=True
-    """
-    SBI_LOG_TRANSFORM_X: bool = True
-    Z_SCORE_X: str | None = "independent"
-
-    # MCMC settings
-    MCMC_METHOD: str = "slice_np_vectorized"
-    NUM_CHAINS: int = 12
-    WARMUP_STEPS: int = 200
-    POSTERIOR_SAMPLES: int = 5000
-
-    """
-    Optional likelihood tempering for debugging only (1.0 = true posterior).
-    If you see crazy posteriors at large NUM_TRIALS_OBS, try TEMPERATURE=10 or 100 to diagnose.
-    """
-    TEMPERATURE: float = 1.0
     THETA_TRUE_FROM_PRIOR: bool = True
-
-    # SBC settings
-    SBC_NUM_DATASETS: int = 10
-    SBC_POST_SAMPLES: int = 1500
 
     # ── NPE (session-level posterior estimation) settings ──
     NPE_NUM_SESSIONS: int = 10_000
@@ -58,9 +39,10 @@ class RunConfig:
     NPE_EMBEDDING_OUTPUT_DIM: int = 64
 
     # NPE inference
-    NPE_POSTERIOR_SAMPLES: int = 5000
+    NPE_POSTERIOR_SAMPLES: int = 200
 
     # NPE SBC
+    RUN_SBC: bool = False
     NPE_SBC_NUM_DATASETS: int = 100
     NPE_SBC_POST_SAMPLES: int = 5000
 
