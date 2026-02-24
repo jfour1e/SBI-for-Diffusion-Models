@@ -5,14 +5,13 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
+import matplotlib.pyplot as plt 
 
 from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
 
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses, pack_x_rt_choice
 from sbi_for_diffusion_models.data_simulator import flatten_observed_session, simulate_training_sessions
-from sbi_for_diffusion_models.mnle import _compute_ranks, _plot_sbc_rank_histograms
 from sbi_for_diffusion_models.Embeddings import MaskAwarePermutationInvariantEmbedding
 
 
@@ -134,6 +133,40 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
 
 
 # ── SBC ───────────────────────────────────────────────────────────────────────
+def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
+    """
+    SBC rank for each dimension:
+      rank_d = #{s in posterior_samples[:, d] : s < theta_true[d]}
+    """
+    theta_true = theta_true.view(-1)
+    return (posterior_samples < theta_true[None, :]).sum(dim=0).to(torch.int64)
+
+
+def _plot_sbc_rank_histograms(
+    ranks: np.ndarray,  # (num_datasets, D)
+    *,
+    param_names: Sequence[str],
+    outpath: Optional[str] = None,
+    bins: int = 30,
+):
+    D = ranks.shape[1]
+    fig, axes = plt.subplots(D, 1, figsize=(8, 2.5 * D), constrained_layout=True)
+    if D == 1:
+        axes = [axes]
+
+    for d, ax in enumerate(axes):
+        ax.hist(ranks[:, d], bins=bins)
+        ax.set_title(f"SBC ranks: {param_names[d]}")
+        ax.set_xlabel("rank")
+        ax.set_ylabel("count")
+
+    if outpath is not None:
+        os.makedirs(os.path.dirname(outpath) or ".", exist_ok=True)
+        fig.savefig(outpath, dpi=150, bbox_inches="tight")
+        print("Saved SBC plot:", outpath)
+
+    return fig
+
 @torch.no_grad()
 def run_sbc_npe(
     cfg,
