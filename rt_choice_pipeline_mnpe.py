@@ -36,7 +36,7 @@ def main():
 
     # ── 1. Simulate session-level training data ──
     print("\n--- Simulating training sessions ---")
-    num_sessions = int(getattr(cfg, "NPE_NUM_SESSIONS", getattr(cfg, "NPE_NUM_TRAIN_SESSIONS")))
+    num_sessions = int(getattr(cfg, "NPE_NUM_SESSIONS", getattr(cfg, "NPE_NUM_SESSIONS")))
     theta_train, x_train = simulate_training_sessions(
         prior_theta=prior_theta,
         num_sessions=num_sessions,

@@ -34,7 +34,7 @@ def simulate_npe_training_data(
     P = max_num_pulses()
     theta_train, x_train = simulate_training_sessions(
         prior_theta,
-        num_sessions=int(cfg.NPE_NUM_TRAIN_SESSIONS),
+        num_sessions=int(cfg.NPE_NUM_SESSIONS),
         num_trials=int(cfg.NUM_TRIALS_OBS),
         device=device,
         mu_sensory=float(cfg.MU_SENSORY),

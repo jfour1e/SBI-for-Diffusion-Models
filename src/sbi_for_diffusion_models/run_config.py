@@ -16,18 +16,18 @@ class RunConfig:
     # Data / simulator settings
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.75
-    NUM_TRIALS_OBS : int = 1000
+    NUM_TRIALS_OBS : int = 200
 
     # We recommend log-transforming RT but NOT the categorical choice.
     LOG_RT_MANUALLY: bool = False
     THETA_TRUE_FROM_PRIOR: bool = True
 
     # ── NPE (session-level posterior estimation) settings ──
-    NPE_NUM_SESSIONS: int = 10_000
+    NPE_NUM_SESSIONS: int = 256
     NPE_TRAIN_BATCH_SIZE: int = 64
     NPE_HIDDEN_FEATURES: int = 128
     NPE_NUM_TRANSFORMS: int = 5
-    NPE_NUM_BINS: int = 10
+    NPE_NUM_BINS: int = 8
 
     # Embedding network (DeepSets)
     NPE_TRIAL_NET_HIDDEN: int = 128
@@ -43,8 +43,8 @@ class RunConfig:
 
     # NPE SBC
     RUN_SBC: bool = False
-    NPE_SBC_NUM_DATASETS: int = 100
-    NPE_SBC_POST_SAMPLES: int = 5000
+    NPE_SBC_NUM_DATASETS: int = 5
+    NPE_SBC_POST_SAMPLES: int = 200
 
 
 RUN_CONFIG_PARAMS = RunConfig()

@@ -5,11 +5,10 @@ description = ""
 requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.8",
-    "numpy>=2.2.6",
-    "numpyro>=0.19.0",
+    "numpy>=1.26,<2",
     "pandas>=2.3.3",
     "sbi>=0.25.0",
-    "torch<2.6.0",
+    "torch>=2.2,<2.6",
 ]
 
 [[tool.uv.index]]
@@ -18,8 +17,9 @@ url = "https://download.pytorch.org/whl/cu121"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu121", marker = "sys_platform == 'win32'" }]
-torchvision = [{ index = "pytorch-cu121", marker = "sys_platform == 'win32'" }]
+torch = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cu121", marker = "sys_platform == 'linux'" }]
 
 [build-system]
 requires = ["hatchling"]

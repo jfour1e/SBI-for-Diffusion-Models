@@ -47,14 +47,15 @@ def generate_pulses_torch(
     if n_trials == 0 or n_pulses == 0:
         return torch.empty((n_trials, n_pulses), device=device, dtype=dtype)
 
-    # correct_side: (N,) in {+1,-1}
-    u = torch.rand((n_trials,), device=device, generator=generator)
-    correct_side = torch.where(u < 0.5, torch.ones_like(u), -torch.ones_like(u)).to(dtype)
+    # correct_side in {+1,-1}
+    # randint avoids making ones_like then where
+    correct_side = torch.randint(
+        low=0, high=2, size=(n_trials,), device=device, generator=generator
+    )
+    # map {0,1} -> {+1,-1}
+    correct_side = (1 - 2 * correct_side).to(dtype)  # 0->+1, 1->-1
 
-    # is_correct: (N,P) bool
     is_correct = torch.rand((n_trials, n_pulses), device=device, generator=generator) < float(p_success)
-
-    # pulses: match correct_side if is_correct else opposite
     s = torch.where(is_correct, correct_side[:, None], -correct_side[:, None])
     return s.to(dtype)
 
