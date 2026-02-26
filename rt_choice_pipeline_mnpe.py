@@ -28,44 +28,25 @@ def main():
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
     trial_dim = 2 + P + 1
-    print(f"P = {P} pulses per trial, T = {T} trials per session, trial_dim = {trial_dim}")
+    print(f"P={P}, T={T}, trial_dim={trial_dim}")
 
     prior_theta = build_prior_theta()
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
 
-    # ── 1. Simulate session-level training data ──
-    print("\n--- Simulating training sessions ---")
-    num_sessions = int(getattr(cfg, "NPE_NUM_SESSIONS", getattr(cfg, "NPE_NUM_SESSIONS")))
-    theta_train, x_train = simulate_training_sessions(
-        prior_theta=prior_theta,
-        num_sessions=num_sessions,
-        num_trials=T,
-        device=dev,
-        mu_sensory=float(cfg.MU_SENSORY),
-        p_success=float(cfg.P_SUCCESS),
-        P=P,
-        log_rt=bool(cfg.LOG_RT_MANUALLY),
-        seed=0,
-    )
-    print("theta_train shape:", tuple(theta_train.shape), "device:", theta_train.device)
-    print("x_train shape:", tuple(x_train.shape), "device:", x_train.device)
-
-    # ── 2. Train NPE with permutation-invariant embedding ──
+    # train
     print("\n--- Training NPE ---")
-    density_estimator, inference_obj = train_npe_session(
-        cfg, prior_theta, theta_train, x_train, device=device
-    )
+    density_estimator, posterior_obj = train_npe_session(cfg, prior_theta, device=device, seed=0)
+    print("density_estimator device:", next(density_estimator.parameters()).device)
 
-    # Save model
     model_dir = os.path.expanduser("~/models")
     os.makedirs(model_dir, exist_ok=True)
     model_path = os.path.join(model_dir, "npe_rt_choice.pt")
     torch.save({"state_dict": density_estimator.state_dict(), "config": cfg}, model_path)
     print("Saved NPE model to:", model_path)
 
-    # ── 3. Simulate observed session ──
-    print("\n--- Simulating observed session (MNPE style) ---")
+    # simulate observed session
+    print("\n--- Simulating observed session ---")
     if bool(cfg.THETA_TRUE_FROM_PRIOR):
         theta_true = prior_theta.sample((1,)).view(5).to(device=dev, dtype=torch.float32)
     else:
@@ -81,27 +62,28 @@ def main():
         P=P,
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=123,
-        theta=theta_true,  # key: conditional simulation for SBC/inference sanity
+        theta=theta_true,
     )
 
     x_3d = x_o_flat.view(1, T, trial_dim)[0]
     mask = x_3d[:, -1]
     n_keep = int(mask.sum().item())
     print("theta_true:", theta_true.detach().cpu().numpy().round(4).tolist())
-    print(f"Observed session: kept {n_keep}/{T} trials (timeouts dropped + padded).")
+    print(f"kept {n_keep}/{T} trials")
 
     if n_keep > 0:
         rt_valid = x_3d[mask == 1, 0]
         choice_valid = x_3d[mask == 1, 1].long()
         counts = torch.bincount(choice_valid, minlength=2).tolist()
-        print("rt[min,max] valid:", float(rt_valid.min()), float(rt_valid.max()))
-        print("choice counts valid:", counts)
+        print("rt[min,max]:", float(rt_valid.min()), float(rt_valid.max()))
+        print("choice counts:", counts)
 
-    # ── 4. Direct posterior sampling (no MCMC) ──
-    print("\n--- Sampling posterior (direct, no MCMC) ---")
-    samples = run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta)
+    # posterior sampling
+    print("\n--- Sampling posterior ---")
+    x_o_flat = x_o_flat.to(next(density_estimator.parameters()).device, dtype=torch.float32)
+    samples = posterior_obj.sample((int(cfg.NPE_POSTERIOR_SAMPLES),), x=x_o_flat, show_progress_bars=True).detach().cpu()
 
-    # ── 5. Save outputs ──
+    # save outputs
     outdir = os.environ.get("OUTDIR", "npe_outputs")
     os.makedirs(outdir, exist_ok=True)
 
@@ -120,13 +102,10 @@ def main():
     plt.close(fig)
     print("Saved:", fig_path)
 
-    # ── 6. SBC (optional — uncomment to run) ──
+    # SBC
     do_sbc = bool(getattr(cfg, "RUN_SBC", False))
     if do_sbc:
         print("\n--- Running SBC ---")
-        posterior_obj = inference_obj.build_posterior(
-            density_estimator=density_estimator, prior=prior_theta
-        )
         sbc_dir = os.path.join(outdir, "sbc")
         run_sbc_npe(
             cfg,

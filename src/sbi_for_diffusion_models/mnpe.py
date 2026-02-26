@@ -5,7 +5,7 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 
 from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
@@ -13,9 +13,9 @@ from sbi.neural_nets import posterior_nn
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses, pack_x_rt_choice
 from sbi_for_diffusion_models.data_simulator import flatten_observed_session, simulate_training_sessions
 from sbi_for_diffusion_models.Embeddings import MaskAwarePermutationInvariantEmbedding
+from sbi.inference.posteriors import DirectPosterior
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
 @torch.no_grad()
 def simulate_npe_training_data(
     cfg,
@@ -25,7 +25,7 @@ def simulate_npe_training_data(
     seed: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Convenience wrapper: simulate (theta_train, x_train) for MNPE on the chosen device.
+    Simulate (theta_train, x_train) for MNPE.
 
     Returns:
       theta_train: (N_sessions, 5) on device
@@ -45,34 +45,28 @@ def simulate_npe_training_data(
     )
     return theta_train, x_train
 
+
 def train_npe_session(
     cfg,
     prior_theta,
-    theta_train: torch.Tensor,
-    x_train: torch.Tensor,
+    *,
     device: str = "cpu",
+    seed: int = 0,
 ):
     """
-    Train an NPE density estimator with a mask-aware permutation-invariant embedding.
+    On-the-fly NPE training: simulate small session batches and do SGD steps
+    without storing the full dataset in RAM.
     """
     dev = torch.device(device)
-
-    # Ensure training tensors are on the correct device 
-    theta_train = theta_train.to(device=dev, dtype=torch.float32)
-    x_train = x_train.to(device=dev, dtype=torch.float32)
+    torch.manual_seed(int(seed))
 
     P = max_num_pulses()
+    T = int(cfg.NUM_TRIALS_OBS)
     trial_dim = 2 + P + 1
-    if x_train.shape[1] % trial_dim != 0:
-        raise ValueError(
-            f"x_train second dim must be divisible by trial_dim={trial_dim}, "
-            f"got x_train.shape={tuple(x_train.shape)}"
-        )
-    num_trials = x_train.shape[1] // trial_dim
 
     embedding_net = MaskAwarePermutationInvariantEmbedding(
-        num_trials=int(num_trials),
-        trial_dim=int(trial_dim),
+        num_trials=T,
+        trial_dim=trial_dim,
         trial_net_hidden=int(cfg.NPE_TRIAL_NET_HIDDEN),
         trial_net_layers=int(cfg.NPE_TRIAL_NET_LAYERS),
         trial_net_output_dim=int(cfg.NPE_TRIAL_NET_OUTPUT_DIM),
@@ -95,17 +89,79 @@ def train_npe_session(
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
 
-    inference = NPE(prior=prior_theta, density_estimator=est_builder, device=str(dev))
-    inference = inference.append_simulations(theta_train, x_train)
+    # dummy batch to build the density estimator (shape inference)
+    theta_dummy, x_dummy = simulate_training_sessions(
+        prior_theta,
+        num_sessions=2,
+        num_trials=T,
+        device=dev,
+        mu_sensory=float(cfg.MU_SENSORY),
+        p_success=float(cfg.P_SUCCESS),
+        P=P,
+        log_rt=bool(cfg.LOG_RT_MANUALLY),
+        seed=int(seed),
+    )
+    theta_dummy = theta_dummy.to(dev, dtype=torch.float32)
+    x_dummy = x_dummy.to(dev, dtype=torch.float32)
 
-    try:
-        density_estimator = inference.train(training_batch_size=int(cfg.NPE_TRAIN_BATCH_SIZE))
-    except TypeError:
-        density_estimator = inference.train(batch_size=int(cfg.NPE_TRAIN_BATCH_SIZE))
+    density_estimator = est_builder(theta_dummy, x_dummy).to(dev)
+    density_estimator.train()
 
-    return density_estimator, inference
+    lr = float(getattr(cfg, "NPE_LR", 5e-4))
+    optimizer = torch.optim.Adam(density_estimator.parameters(), lr=lr)
 
-# ── Inference ─────────────────────────────────────────────────────────────────
+    sess_per_step = int(getattr(cfg, "NPE_SESSIONS_PER_STEP", 8))
+    num_steps = int(getattr(cfg, "NPE_NUM_STEPS", 10_000))
+
+    print(f"[NPE] device={dev}, sess_per_step={sess_per_step}, num_steps={num_steps}, lr={lr}")
+
+    best = float("inf")
+    bad = 0
+    patience = int(getattr(cfg, "NPE_PATIENCE", 30))
+    min_delta = float(getattr(cfg, "NPE_MIN_DELTA", 1e-3))
+    ema_beta = float(getattr(cfg, "NPE_EMA_BETA", 0.98))
+    ema = None
+
+    for step in range(num_steps):
+        theta_b, x_b = simulate_training_sessions(
+            prior_theta,
+            num_sessions=sess_per_step,
+            num_trials=T,
+            device=dev,
+            mu_sensory=float(cfg.MU_SENSORY),
+            p_success=float(cfg.P_SUCCESS),
+            P=P,
+            log_rt=bool(cfg.LOG_RT_MANUALLY),
+            seed=int(seed + step + 1),
+        )
+        theta_b = theta_b.to(dev, dtype=torch.float32)
+        x_b = x_b.to(dev, dtype=torch.float32)
+
+        optimizer.zero_grad(set_to_none=True)
+        losses = density_estimator.loss(theta_b, condition=x_b)
+        loss = losses.mean()
+        loss.backward()
+        optimizer.step()
+
+        li = float(loss.item())
+        ema = li if ema is None else ema_beta * ema + (1 - ema_beta) * li
+
+        if (step + 1) % 50 == 0:
+            print(f"step {step+1}: loss={li:.4f} ema={ema:.4f}")
+
+            if ema < best - min_delta:
+                best = ema
+                bad = 0
+            else:
+                bad += 1
+                if bad >= patience:
+                    print(f"[NPE] early stop at step {step+1}")
+                    break
+
+    posterior = DirectPosterior(density_estimator, prior_theta)
+    return density_estimator, posterior
+
+
 def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta):
     """
     Direct posterior sampling from the amortized NPE posterior.
@@ -132,7 +188,6 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
     return samples
 
 
-# ── SBC ───────────────────────────────────────────────────────────────────────
 def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
     """
     SBC rank for each dimension:
@@ -167,6 +222,7 @@ def _plot_sbc_rank_histograms(
 
     return fig
 
+
 @torch.no_grad()
 def run_sbc_npe(
     cfg,
@@ -182,10 +238,8 @@ def run_sbc_npe(
     plot_bins: int = 30,
 ) -> dict:
     """
-    SBC for the NPE pipeline using the same MNPE session simulator (mask-aware, timeout-dropped).
-
-    This version keeps simulation and posterior sampling on the chosen device and only moves
-    results to CPU for saving/plotting.
+    SBC for the NPE pipeline. Simulation and posterior sampling run on `device`;
+    results are moved to CPU for saving/plotting.
     """
     os.makedirs(outdir, exist_ok=True)
 
@@ -204,10 +258,8 @@ def run_sbc_npe(
     trial_dim = 2 + P + 1
 
     for i in range(int(num_datasets)):
-        # Sample theta_true
         theta_true = prior_theta.sample((1,)).view(5).to(device=dev, dtype=torch.float32)
 
-        # simulate data 
         _, x_o = simulate_training_sessions(
             prior_theta,
             num_sessions=1,
@@ -218,10 +270,9 @@ def run_sbc_npe(
             P=P,
             log_rt=bool(cfg.LOG_RT_MANUALLY),
             seed=int(rng.integers(0, 2**31 - 1)),
-            theta=theta_true,  
+            theta=theta_true,
         )
-        
-        # sample from posterior 
+
         if x_o.shape != (1, T * trial_dim):
             raise RuntimeError(f"Unexpected x_o shape: {tuple(x_o.shape)}")
 
@@ -233,8 +284,8 @@ def run_sbc_npe(
         all_samples.append(samples)
 
         if (i + 1) % 10 == 0:
-            print(f"[SBC-NPE] {i + 1}/{num_datasets} done. ranks={r.tolist()}")
-            
+            print(f"[SBC] {i + 1}/{num_datasets} done. ranks={r.tolist()}")
+
     thetas_true = np.stack(thetas_true, axis=0)
     ranks = np.stack(ranks, axis=0)
 

@@ -313,6 +313,34 @@ def simulate_rt_choice_batch(
 
     return x, hit, s
 
+def mask_unperceived_pulses(
+    pulse_sides: Tensor,
+    rt: Tensor,
+    pulse_interval: float = float(PULSE_INTERVAL),
+) -> Tensor:
+    """
+    Set pulse entries to NaN for any pulse the animal could not have perceived.
+
+    A pulse at index k is presented at time k * pulse_interval (seconds).
+    If that time > rt (response time, including non-decision time), the animal
+    had already responded and would not have perceived that flash in a real experiment.
+
+    Args:
+        pulse_sides:   (N, P) tensor of pulse values in {-1, +1}
+        rt:            (N,)   tensor of raw response times in seconds
+        pulse_interval: seconds between successive pulses
+
+    Returns:
+        (N, P) tensor with NaN in every slot where k * pulse_interval > rt[i]
+    """
+    N, P = pulse_sides.shape
+    pulse_times = torch.arange(P, device=pulse_sides.device, dtype=torch.float32) * pulse_interval
+    unperceived = pulse_times.unsqueeze(0) > rt.to(pulse_sides.device).unsqueeze(1)  # (N, P)
+    out = pulse_sides.clone()
+    out[unperceived] = float("nan")
+    return out
+
+
 def pack_x_rt_choice(rt_choice: Tensor, *, log_rt: bool) -> Tensor:
     rt = rt_choice[:, 0:1].to(torch.float32).clamp_min(1e-6)
     if log_rt:
