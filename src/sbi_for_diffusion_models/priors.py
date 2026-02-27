@@ -81,9 +81,9 @@ def build_prior_theta() -> Distribution:
     return MultipleIndependent(
         [
             LogisticNormal(torch.tensor([0.0]), torch.tensor([0.5])),   # a0  ∈ (0,1)
-            ExpNormal(torch.tensor([-1.0]), torch.tensor([0.25])),       # lam ∈ (0,∞)
-            ExpNormal(torch.tensor([0.0]), torch.tensor([0.25])),        # v   ∈ (0,∞)
-            ExpNormal(torch.tensor([1.5]), torch.tensor([0.25])),       # B   ∈ (0,∞)
+            ExpNormal(torch.tensor([-1.0]), torch.tensor([0.5])),       # lam ∈ (0,∞)
+            ExpNormal(torch.tensor([0.0]), torch.tensor([0.5])),        # v   ∈ (0,∞)
+            ExpNormal(torch.tensor([1.5]), torch.tensor([0.5])),       # B   ∈ (0,∞)
             LogisticNormal(torch.tensor([0.0]), torch.tensor([1.5])),   # tau ∈ (0,1)
         ]
     )

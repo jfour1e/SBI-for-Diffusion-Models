@@ -66,14 +66,8 @@ def simulate_training_sessions(
     B = min(sim_batch_size, N)
     batch_buf = torch.empty((B, T, trial_dim), device=device, dtype=torch.float32)
 
-    last_pct = -1
     for start in range(0, N, sim_batch_size):
         b = min(sim_batch_size, N - start)
-
-        pct = 100 * start // N
-        if pct // 10 > last_pct // 10:
-            print(f"Simulating: {pct}% ({start}/{N})")
-            last_pct = pct
 
         theta_batch = theta_all[start : start + b].to(device=device)  # (b, 5)
         theta_rep   = theta_batch.repeat_interleave(T, dim=0)         # (b*T, 5)
@@ -111,8 +105,6 @@ def simulate_training_sessions(
         buf[:, :, 2 : 2+P ].copy_(pulses_masked)
         buf[:, :, 2+P :   ].copy_(mask)
         x_all[start : start + b].copy_(buf.view(b, T * trial_dim))
-
-    print(f"Simulating: 100% ({N}/{N})")
     return theta_all, x_all
 
 

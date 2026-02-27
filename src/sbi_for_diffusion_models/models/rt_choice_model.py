@@ -172,6 +172,99 @@ def _run_coarse_ou_loop(
 
     return hit, choice, hit_interval, a_before_hit, hit_from_pulse
 
+def _run_fine_ou_loop(
+    a0_frac: Tensor,
+    lam: Tensor,
+    v: Tensor,
+    B: Tensor,
+    tau: Tensor,
+    s: Tensor,                      # (N, P_max) in {-1,+1}
+    *,
+    mu_sensory: float,
+    dt_internal: float,
+    pulse_interval: float,
+    T_MAX: float,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """
+    Fine-step OU simulator:
+      - internal OU step dt_internal (e.g. 10ms)
+      - pulse kicks every pulse_interval (e.g. 250ms) at t = k*pulse_interval (k=0,1,...)
+      - checks boundary after pulse kick and after OU step
+    Returns:
+      hit: (N,) bool
+      choice: (N,) int64 0=lower, 1=upper (only meaningful when hit=True)
+      decision_time: (N,) float32 (0..T_MAX-tau), only meaningful when hit=True
+    """
+    device = a0_frac.device
+    dtype = a0_frac.dtype
+    N = a0_frac.shape[0]
+
+    delta = float(pulse_interval)
+    dt0 = float(dt_internal)
+
+    # Make dt divide the pulse interval exactly (avoids drift)
+    steps_per_pulse = max(1, int(round(delta / dt0)))
+    dt = delta / steps_per_pulse  # adjusted dt used in simulation
+
+    # Max number of pulses implied by T_MAX/pulse_interval
+    P_max = s.shape[1]
+
+    # Continuous decision window length for each trial
+    max_dec_time = (float(T_MAX) - tau).clamp_min(0.0)  # (N,)
+    step_limit = torch.floor(max_dec_time / dt).to(torch.int64)  # (N,)
+    max_steps = int(step_limit.max().item()) if N > 0 else 0
+
+    # OU params per dt
+    decay, noise_std = _ou_transition_params(lam, dt, float(mu_sensory))  # (N,), (N,)
+
+    a = a0_frac * B
+    hit = torch.zeros((N,), dtype=torch.bool, device=device)
+    choice = torch.zeros((N,), dtype=torch.int64, device=device)
+    decision_time = torch.zeros((N,), dtype=dtype, device=device)
+
+    for step in range(max_steps + 1):
+        active = (~hit) & (step < step_limit)
+        if not torch.any(active):
+            break
+
+        # --- pulse kick at t = k*delta ---
+        if step % steps_per_pulse == 0:
+            k = step // steps_per_pulse
+            if k < P_max:
+                # apply kick to active trials
+                a = torch.where(active, a + v * s[:, k], a)
+
+                # check boundary immediately after kick
+                hit_upper = active & (a >= B)
+                hit_lower = active & (a <= 0.0)
+                newly_hit = hit_upper | hit_lower
+                if torch.any(newly_hit):
+                    hit[newly_hit] = True
+                    choice[hit_upper] = 1
+                    choice[hit_lower] = 0
+                    decision_time[newly_hit] = step * dt  # exact pulse time
+
+        # remaining active after pulse check
+        active = (~hit) & (step < step_limit)
+        if not torch.any(active):
+            continue
+
+        # --- OU evolution for dt ---
+        eps = torch.randn((N,), device=device, dtype=dtype)
+        a = torch.where(active, a * decay + noise_std * eps, a)
+
+        # boundary check after OU step (at t=(step+1)*dt)
+        hit_upper = active & (a >= B)
+        hit_lower = active & (a <= 0.0)
+        newly_hit = hit_upper | hit_lower
+        if torch.any(newly_hit):
+            hit[newly_hit] = True
+            choice[hit_upper] = 1
+            choice[hit_lower] = 0
+            decision_time[newly_hit] = (step + 1) * dt
+
+    return hit, choice, decision_time
+
 
 # -------------- MNPE Simulator --------------
 def simulate_rt_choice_batch(
@@ -180,23 +273,9 @@ def simulate_rt_choice_batch(
     mu_sensory: float,
     pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
     p_success: float = cfg.P_SUCCESS,
-    n_refine: int = _DEFAULT_N_REFINE,
+    n_refine: int = _DEFAULT_N_REFINE,  # kept for compatibility; ignored now
     pulse_generator: Optional[torch.Generator] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """
-    MNPE-first simulator.
-
-    Inputs:
-      theta: (N,5) or (5,)
-      pulse_sides:
-        - If provided: (N,P_max) or (P_max,) or (1,P_max)
-        - If None: generate pulses in torch on theta.device
-
-    Outputs:
-      x   : (N,2) float32 [rt, choice] (choice valid only where hit=True)
-      hit : (N,) bool      True if decision occurred before timeout window
-      s   : (N,P_max) float32 pulse sides actually used (so caller can store/flatten)
-    """
     if theta.ndim == 1:
         theta = theta.view(1, -1)
     if theta.shape[-1] != 5:
@@ -208,22 +287,15 @@ def simulate_rt_choice_batch(
 
     N = theta.shape[0]
     a0_frac = theta[:, 0].clamp(0.0, 1.0)
-    lam = theta[:, 1]
+    lam = theta[:, 1].abs()  # keep nonnegative
     v = theta[:, 2].abs()
     B = theta[:, 3].abs().clamp_min(1e-6)
-    t_nd = theta[:, 4].clamp(0.0, float(T_MAX) - 1e-6)
+    tau = theta[:, 4].clamp(0.0, float(T_MAX) - 1e-6)
 
     delta = float(PULSE_INTERVAL)
-    sigma = float(mu_sensory)
     P_max = max_num_pulses()
 
-    # decision window in full pulse intervals
-    n_intervals = torch.floor((float(T_MAX) - t_nd) / delta).to(torch.int64).clamp(0, P_max)
-
-    # coarse OU params
-    decay_coarse, noise_std_coarse = _ou_transition_params(lam, delta, sigma)
-
-    # pulse sides
+    # pulses in {-1,+1}
     if pulse_sides is None:
         s = generate_pulses_torch(
             n_trials=N,
@@ -243,74 +315,24 @@ def simulate_rt_choice_batch(
             raise ValueError(f"pulse_sides has P={s.shape[1]} but needs at least {P_max} for T_MAX.")
         s = s[:, :P_max]
 
-    # coarse pass
-    hit, choice, hit_interval, a_before_hit, hit_from_pulse = _run_coarse_ou_loop(
+    # internal step (add DT_INTERNAL to your config)
+    dt_internal = float(getattr(cfg, "DT_INTERNAL", 0.01))
+
+    hit, choice, decision_time = _run_fine_ou_loop(
         a0_frac=a0_frac,
+        lam=lam,
         v=v,
         B=B,
-        decay=decay_coarse,
-        noise_std=noise_std_coarse,
+        tau=tau,
         s=s,
-        n_intervals=n_intervals,
-        P_max=P_max,
+        mu_sensory=float(mu_sensory),
+        dt_internal=dt_internal,
+        pulse_interval=delta,
+        T_MAX=float(T_MAX),
     )
 
-    # decision time (only meaningful where hit=True)
-    decision_time = hit_interval.to(dtype) * delta
-
-    # refine OU-step crossings
-    ou_mask = hit & (~hit_from_pulse)
-    if torch.any(ou_mask) and n_refine > 1:
-        idx = torch.where(ou_mask)[0]
-        M = idx.shape[0]
-        k_cross = hit_interval[idx] - 1  # 0-based
-
-        pulse_val = v[idx] * s[idx, k_cross]
-
-        sub_delta = delta / n_refine
-        decay_fine, noise_std_fine = _ou_transition_params(lam[idx], sub_delta, sigma)
-
-        a_r = a_before_hit[idx].clone()
-        hit_r = torch.zeros((M,), dtype=torch.bool, device=device)
-        choice_r = torch.zeros((M,), dtype=torch.int64, device=device)
-        hit_substep = torch.full((M,), n_refine, dtype=torch.int64, device=device)
-
-        # Refine noise
-        for t in range(n_refine):
-            active_r = ~hit_r
-            if not torch.any(active_r):
-                break
-            eps = torch.randn((M,), device=device, dtype=dtype)
-            a_r = torch.where(active_r, a_r * decay_fine + noise_std_fine * eps, a_r)
-
-            hit_upper = active_r & (a_r >= B[idx])
-            hit_lower = active_r & (a_r <= 0.0)
-            newly_hit = hit_upper | hit_lower
-            if torch.any(newly_hit):
-                hit_substep[newly_hit] = t + 1
-                choice_r[hit_upper] = 1
-                choice_r[hit_lower] = 0
-                hit_r[newly_hit] = True
-
-        still_active = ~hit_r
-        if torch.any(still_active):
-            a_r = torch.where(still_active, a_r + pulse_val, a_r)
-            hit_upper = still_active & (a_r >= B[idx])
-            hit_lower = still_active & (a_r <= 0.0)
-            newly_hit = hit_upper | hit_lower
-            if torch.any(newly_hit):
-                hit_substep[newly_hit] = n_refine
-                choice_r[hit_upper] = 1
-                choice_r[hit_lower] = 0
-                hit_r[newly_hit] = True
-
-        decision_time[idx] = k_cross.to(dtype) * delta + hit_substep.to(dtype) * sub_delta
-        # update choice for refined hits
-        choice[idx[hit_r]] = choice_r[hit_r]
-
-    rt = (t_nd + decision_time).clamp(1e-6, float(T_MAX))
+    rt = (tau + decision_time).clamp(1e-6, float(T_MAX))
     x = torch.stack([rt, choice.to(dtype)], dim=-1)
-
     return x, hit, s
 
 def mask_unperceived_pulses(

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 # defines constants used in the SBI for Diffusion Models project
 DT = 1e-6
 DT_CHOICE = 5e-4
+DT_INTERNAL = 0.01
 T_MAX = 10.0
 PULSE_INTERVAL = 0.25 # in seconds (i.e., 250 ms)
 
