@@ -5,19 +5,17 @@ from dataclasses import dataclass
 DT = 1e-6
 DT_CHOICE = 5e-4
 DT_INTERNAL = 0.01
+FLASH_DURATION = 0.020     
 T_MAX = 10.0
-PULSE_INTERVAL = 0.25 # in seconds (i.e., 250 ms)
-
-# Refinement sub-steps used only inside the single crossing interval.
-# resolution = PULSE_INTERVAL / _DEFAULT_N_REFINE  (default 0.1 ms)
-_DEFAULT_N_REFINE = 1000
+PULSE_INTERVAL = 0.230 # in seconds (i.e., 250 ms)
+MAX_REGEN = 500
 
 @dataclass(frozen=True)
 class RunConfig:
 # Data / simulator settings
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.6
-    NUM_TRIALS_OBS : int = 5_000
+    NUM_TRIALS_OBS : int = 5000
 
     # We recommend log-transforming RT but NOT the categorical choice.
     LOG_RT_MANUALLY: bool = False
@@ -46,7 +44,7 @@ class RunConfig:
     NPE_POSTERIOR_SAMPLES: int = 20000
 
     # NPE SBC
-    RUN_SBC: bool = False
+    RUN_SBC: bool = True
     NPE_SBC_NUM_DATASETS: int = 5
     NPE_SBC_POST_SAMPLES: int = 200
 

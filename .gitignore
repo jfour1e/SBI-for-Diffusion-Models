@@ -5,3 +5,4 @@
 models/mnle_rt_choice.pt
 sbi-logs/NPE_C
 /npe_outputs
+/sbc_outputs

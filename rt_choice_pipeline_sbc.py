@@ -13,7 +13,7 @@ from sbi.neural_nets import posterior_nn
 
 from sbi_for_diffusion_models.priors import build_prior_theta
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
-from sbi_for_diffusion_models.Embeddings import MaskAwarePermutationInvariantEmbedding
+from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
 from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 
@@ -34,7 +34,7 @@ def load_npe(model_path: str, device: str = "cpu"):
     theta_dim = 5
     x_dim = T * trial_dim
 
-    embedding_net = MaskAwarePermutationInvariantEmbedding(
+    embedding_net = PermutationInvariantEmbedding(
         num_trials=T,
         trial_dim=trial_dim,
         trial_net_hidden=int(saved_cfg.NPE_TRIAL_NET_HIDDEN),

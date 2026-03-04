@@ -12,7 +12,7 @@ from sbi.neural_nets import posterior_nn
 
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses, pack_x_rt_choice
 from sbi_for_diffusion_models.data_simulator import flatten_observed_session, simulate_training_sessions
-from sbi_for_diffusion_models.Embeddings import MaskAwarePermutationInvariantEmbedding
+from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
 from sbi.inference.posteriors import DirectPosterior
 
 
@@ -62,9 +62,9 @@ def train_npe_session(
 
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
-    trial_dim = 2 + P + 1
+    trial_dim = 2 + P
 
-    embedding_net = MaskAwarePermutationInvariantEmbedding(
+    embedding_net = PermutationInvariantEmbedding(
         num_trials=T,
         trial_dim=trial_dim,
         trial_net_hidden=int(cfg.NPE_TRIAL_NET_HIDDEN),
@@ -255,7 +255,7 @@ def run_sbc_npe(
 
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
-    trial_dim = 2 + P + 1
+    trial_dim = 2 + P
 
     for i in range(int(num_datasets)):
         theta_true = prior_theta.sample((1,)).view(5).to(device=dev, dtype=torch.float32)

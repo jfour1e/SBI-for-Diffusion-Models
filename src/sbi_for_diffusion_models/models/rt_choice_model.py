@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from ..run_config import RUN_CONFIG_PARAMS, T_MAX, PULSE_INTERVAL,_DEFAULT_N_REFINE
+from ..run_config import RUN_CONFIG_PARAMS, T_MAX, PULSE_INTERVAL
 cfg = RUN_CONFIG_PARAMS
 
 # ---------------- Helper functions ----------------
@@ -58,29 +58,6 @@ def generate_pulses_torch(
     is_correct = torch.rand((n_trials, n_pulses), device=device, generator=generator) < float(p_success)
     s = torch.where(is_correct, correct_side[:, None], -correct_side[:, None])
     return s.to(dtype)
-
-# not needed anymore unless user wants to generate Numpy based matrix 
-def generate_pulse_matrix_numpy(
-    rng: np.random.Generator,
-    n_trials: int,
-    n_pulses: int,
-    *,
-    p_success: float = cfg.P_SUCCESS,
-) -> np.ndarray:
-    """
-    Optional legacy NumPy pulse generator. Keep if you want NumPy-seeded stimuli.
-    """
-    if n_trials < 0:
-        raise ValueError("n_trials must be >= 0")
-    if n_pulses < 0:
-        raise ValueError("n_pulses must be >= 0")
-    if n_trials == 0 or n_pulses == 0:
-        return np.empty((n_trials, n_pulses), dtype=np.float32)
-
-    correct_side = np.where(rng.random(n_trials) < 0.5, 1.0, -1.0)
-    is_correct = rng.random((n_trials, n_pulses)) < p_success
-    return np.where(is_correct, correct_side[:, None], -correct_side[:, None]).astype(np.float32)
-
 
 # ---------------- OU transition and coarse loop ----------------
 def _ou_transition_params(
@@ -273,7 +250,6 @@ def simulate_rt_choice_batch(
     mu_sensory: float,
     pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
     p_success: float = cfg.P_SUCCESS,
-    n_refine: int = _DEFAULT_N_REFINE,  # kept for compatibility; ignored now
     pulse_generator: Optional[torch.Generator] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     if theta.ndim == 1:
@@ -342,18 +318,6 @@ def mask_unperceived_pulses(
 ) -> Tensor:
     """
     Set pulse entries to NaN for any pulse the animal could not have perceived.
-
-    A pulse at index k is presented at time k * pulse_interval (seconds).
-    If that time > rt (response time, including non-decision time), the animal
-    had already responded and would not have perceived that flash in a real experiment.
-
-    Args:
-        pulse_sides:   (N, P) tensor of pulse values in {-1, +1}
-        rt:            (N,)   tensor of raw response times in seconds
-        pulse_interval: seconds between successive pulses
-
-    Returns:
-        (N, P) tensor with NaN in every slot where k * pulse_interval > rt[i]
     """
     N, P = pulse_sides.shape
     pulse_times = torch.arange(P, device=pulse_sides.device, dtype=torch.float32) * pulse_interval
