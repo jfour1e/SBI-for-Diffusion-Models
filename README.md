@@ -21,17 +21,14 @@ The project uses **[`uv`](https://github.com/astral-sh/uv)** for fast, reproduci
   - `hit` mask (timeout vs. decision)
   - pulse sequence `s` (±1)
 
-### Session formatting (mask-aware)
+### Session formatting
 - Each session contains `T` trials.
-- Trials that timeout are **dropped**, then the session is **padded back to length `T`** with:
-  - zero-filled trial data
-  - a mask bit `mask ∈ {0,1}` (1 = real, 0 = padded)
+- Trials that timeout are retried
 
 Final flattened representation:
 - `x_session`: shape `(N_sessions, T * (2 + P + 1))`
   - `2` = `[rt, choice]`
   - `P` = pulses per trial
-  - `1` = mask channel
 
 ### NPE / MNPE model (sbi)
 - `sbi` NPE with an NSF flow (`posterior_nn(model="nsf")`)
