@@ -8,7 +8,7 @@ from sbi_for_diffusion_models.models.rt_choice_model import (
     max_num_pulses,
     mask_unperceived_pulses,
 )
-from .run_config import PULSE_INTERVAL, T_MAX, MAX_REGEN
+from .run_config import T_MAX, MAX_REGEN, MAX_TIMEOUT_TRIES
 
 @torch.no_grad()
 def simulate_training_sessions(
@@ -35,27 +35,26 @@ def simulate_training_sessions(
       - concatenate per-trial features as [rt, choice, pulse_1..pulse_P]  (NO mask)
       - flatten to (T*(2+P),)
     """
-    dev = device
     N = int(num_sessions)
     T = int(num_trials)
     P = int(P)
     trial_dim = 2 + P
 
     torch.manual_seed(int(seed)) # torch generator 
-    gen = torch.Generator(device=dev)
+    gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
 
-    theta_all = torch.empty((N, 5), device=dev, dtype=torch.float32)
-    x_all = torch.empty((N, T * trial_dim), device=dev, dtype=torch.float32)
+    theta_all = torch.empty((N, 5), device=device, dtype=torch.float32)
+    x_all = torch.empty((N, T * trial_dim), device=device, dtype=torch.float32)
 
     # Optional fixed theta 
     theta_fixed: Optional[torch.Tensor] = None
     if theta is not None:
-        theta = theta.to(device=dev, dtype=torch.float32)
+        theta = theta.to(device=device, dtype=torch.float32)
         if theta.ndim == 1:
             if theta.shape[0] != 5:
                 raise ValueError(f"theta must have shape (5,) or (N,5); got {tuple(theta.shape)}")
-            theta_all.copy_(theta.view(1, 5).expand(N, 5))
+            theta_fixed = theta.view(1, 5).expand(N, 5)
         elif theta.ndim == 2:
             if theta.shape != (N, 5):
                 raise ValueError(f"theta must have shape ({N},5); got {tuple(theta.shape)}")
@@ -63,10 +62,13 @@ def simulate_training_sessions(
         else:
             raise ValueError(f"theta must have shape (5,) or (N,5); got {tuple(theta.shape)}")
 
+    timeout_frac_allowed = 0.15
+    allowed_timeouts = int(torch.ceil(torch.tensor(timeout_frac_allowed * T, device=device)).item())
+
     for i in range(N):
         # Sample theta or use fixed
         if theta_fixed is None:
-            theta_i = prior_theta.sample((1,)).view(5).to(device=dev, dtype=torch.float32)
+            theta_i = prior_theta.sample((1,)).view(5).to(device=device, dtype=torch.float32)
         else:
             theta_i = theta_fixed[i]
         theta_all[i] = theta_i
@@ -74,7 +76,7 @@ def simulate_training_sessions(
         # fixed pulses for this session (T,P)
         pulses = generate_pulses_torch(
             n_trials=T,
-            n_pulses=int(P),
+            n_pulses=P,
             p_success=float(p_success),
             device=device,
             dtype=torch.float32,
@@ -92,25 +94,22 @@ def simulate_training_sessions(
         )
 
         # retry only timeouts 
-        timeout_frac_allowed = 0.10
-        allowed_timeouts = int(torch.ceil(torch.tensor(timeout_frac_allowed * T, device=dev)).item())
-
         not_hit = ~hit
-        n_timeouts = int(not_hit.sum().item())
-
         regen_used = 0
 
-        while n_timeouts > allowed_timeouts and regen_used < MAX_REGEN:
-            need_to_fix = n_timeouts - allowed_timeouts
-
-            # pick the timeout indices 
+        for _attempt in range(MAX_TIMEOUT_TRIES):
             idx_all = not_hit.nonzero(as_tuple=False).squeeze(1)
-            if idx_all.numel() == 0:
+            M_all = int(idx_all.numel())
+            if M_all == 0:
                 break
 
-            # choose a subset to resim to save budget
-            M = min(int(idx_all.numel()), int(need_to_fix), int(MAX_REGEN - regen_used))
-            idx = idx_all[:M] # choose first max(to_fix, MAX_REGEN) samples
+            # respect compute budget
+            remaining_budget = MAX_REGEN - regen_used
+            if remaining_budget <= 0:
+                break
+
+            M = min(M_all, int(remaining_budget))
+            idx = idx_all[:M]  # deterministic; swap for randperm if you want
             M = int(idx.numel())
             if M == 0:
                 break
@@ -131,16 +130,17 @@ def simulate_training_sessions(
 
             regen_used += M
             not_hit = ~hit
-            n_timeouts = int(not_hit.sum().item())
 
         # prior predictive check sent to user -- pass in better prior
+        n_timeouts = int(not_hit.sum().item())
+
         if n_timeouts > allowed_timeouts:
-            frac = float((torch.tensor(n_timeouts, device=dev, dtype=torch.float32) /
-              torch.tensor(max(1, T), device=dev, dtype=torch.float32)).item())
+            denom = torch.tensor(max(1, T), device=device, dtype=torch.float32)
+            frac = float((torch.tensor(n_timeouts, device=device, dtype=torch.float32) / denom).item())
             raise RuntimeError(
-                f"[prior predictive check failed] Too many timeout trials.\n"
+                f"[prior predictive check failed] Too many timeout trials after retries.\n"
                 f"Session {i}: timeouts={n_timeouts}/{T} ({frac:.1%}), allowed={allowed_timeouts}/{T} ({timeout_frac_allowed:.0%}).\n"
-                f"MAX_REGEN={MAX_REGEN}, regen_used={regen_used}.\n"
+                f"MAX_TIMEOUT_TRIES={MAX_TIMEOUT_TRIES}, MAX_REGEN={MAX_REGEN}, regen_used={regen_used}.\n"
                 f"This likely indicates a bad prior (e.g., drift too small, bounds too large, tau too close to T_MAX, etc.)."
             )
         
