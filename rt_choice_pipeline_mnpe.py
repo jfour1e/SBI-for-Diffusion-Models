@@ -36,7 +36,9 @@ def main():
 
     # train
     print("\n--- Training NPE ---")
-    density_estimator, posterior_obj = train_npe_session(cfg, prior_theta, device=device, seed=0)
+    density_estimator, posterior_obj = train_npe_session(
+        cfg, prior_theta, device=device, seed=0
+    )
     print("density_estimator device:", next(density_estimator.parameters()).device)
 
     model_dir = os.path.expanduser("~/models")
@@ -66,23 +68,22 @@ def main():
     )
 
     x_3d = x_o_flat.view(1, T, trial_dim)[0]
-    mask = x_3d[:, -1]
-    n_keep = int(mask.sum().item())
+    rt_valid = x_3d[:, 0]
+    choice_valid = x_3d[:, 1].long()
     print("theta_true:", theta_true.detach().cpu().numpy().round(4).tolist())
-    print(f"kept {n_keep}/{T} trials")
-
-    if n_keep > 0:
-        rt_valid = x_3d[mask == 1, 0]
-        choice_valid = x_3d[mask == 1, 1].long()
-        counts = torch.bincount(choice_valid, minlength=2).tolist()
-        print("rt[min,max]:", float(rt_valid.min()), float(rt_valid.max()))
-        print("choice counts:", counts)
+    print(f"num trials: {T}")
+    print("rt[min,max]:", float(rt_valid.min()), float(rt_valid.max()))
+    print("choice counts:", torch.bincount(choice_valid, minlength=2).tolist())
 
     # posterior sampling
     print("\n--- Sampling posterior ---")
     x_o_flat = x_o_flat.to(next(density_estimator.parameters()).device, dtype=torch.float32)
-    samples = posterior_obj.sample((int(cfg.NPE_POSTERIOR_SAMPLES),), x=x_o_flat, show_progress_bars=True).detach().cpu()
-
+    samples = posterior_obj.sample(
+        (int(cfg.NPE_POSTERIOR_SAMPLES),),
+        x=x_o_flat,
+        show_progress_bars=True,
+    ).detach().cpu()
+    
     # save outputs
     outdir = os.environ.get("OUTDIR", "npe_outputs")
     os.makedirs(outdir, exist_ok=True)
