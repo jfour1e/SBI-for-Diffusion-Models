@@ -6,20 +6,22 @@ DT = 1e-6
 DT_CHOICE = 5e-4
 DT_INTERNAL = 0.01
 FLASH_DURATION = 0.020     
-T_MAX = 10.0
+T_MAX = 8.0
 PULSE_INTERVAL = 0.230 # in seconds (i.e., 230 ms)
-MAX_REGEN = 10000
-MAX_TIMEOUT_TRIES = 5
+
+# regeneration tolerance 
+MAX_TIMEOUT_TRIES = 10
+TIMEOUT_FRAC_ALLOWED = 0.10
 
 @dataclass(frozen=True)
 class RunConfig:
 # Data / simulator settings
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.6
-    NUM_TRIALS_OBS : int = 2000
+    NUM_TRIALS_OBS : int = 256
 
     # We recommend log-transforming RT but NOT the categorical choice.
-    LOG_RT_MANUALLY: bool = False
+    LOG_RT_MANUALLY: bool = True
     THETA_TRUE_FROM_PRIOR: bool = True
 
     # NPE settings

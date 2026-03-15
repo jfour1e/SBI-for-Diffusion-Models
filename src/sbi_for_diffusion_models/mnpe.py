@@ -9,12 +9,15 @@ import matplotlib.pyplot as plt
 
 from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
+from sbi.inference.posteriors import DirectPosterior
 
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses, pack_x_rt_choice
 from sbi_for_diffusion_models.data_simulator import flatten_observed_session, simulate_training_sessions
 from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
-from sbi.inference.posteriors import DirectPosterior
 
+# ---------------------------------------------------------------------
+# Training-data simulation
+# ---------------------------------------------------------------------
 
 @torch.no_grad()
 def simulate_npe_training_data(
@@ -25,11 +28,8 @@ def simulate_npe_training_data(
     seed: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Simulate (theta_train, x_train) for MNPE.
-
-    Returns:
-      theta_train: (N_sessions, 5) on device
-      x_train: (N_sessions, T*(2+P+1)) on device, with mask included per trial
+    Simulate session-level training pairs (theta, x) for NPE.
+    Returns theta_train of shape (N, 5) and flattened x_train of shape (N, T*(2+P)).
     """
     P = max_num_pulses()
     theta_train, x_train = simulate_training_sessions(
@@ -45,26 +45,11 @@ def simulate_npe_training_data(
     )
     return theta_train, x_train
 
-
-def train_npe_session(
-    cfg,
-    prior_theta,
-    *,
-    device: str = "cpu",
-    seed: int = 0,
-):
-    """
-    On-the-fly NPE training: simulate small session batches and do SGD steps
-    without storing the full dataset in RAM.
-    """
-    dev = torch.device(device)
-    torch.manual_seed(int(seed))
-
-    P = max_num_pulses()
-    T = int(cfg.NUM_TRIALS_OBS)
+def _build_npe_embedding_net(cfg, *, T: int, P: int) -> torch.nn.Module:
+    """Build the permutation-invariant session embedding network."""
     trial_dim = 2 + P
 
-    embedding_net = PermutationInvariantEmbedding(
+    return PermutationInvariantEmbedding(
         num_trials=T,
         trial_dim=trial_dim,
         trial_net_hidden=int(cfg.NPE_TRIAL_NET_HIDDEN),
@@ -74,9 +59,11 @@ def train_npe_session(
         post_agg_layers=int(cfg.NPE_POST_AGG_LAYERS),
         output_dim=int(cfg.NPE_EMBEDDING_OUTPUT_DIM),
         aggregation=str(cfg.NPE_AGG_FN),
-    ).to(dev)
+    )
 
-    est_builder = posterior_nn(
+def _build_npe_estimator_builder(cfg, embedding_net):
+    """Build the SBI posterior density-estimator factory."""
+    return posterior_nn(
         model="nsf",
         z_score_theta="independent",
         z_score_x="none",
@@ -86,11 +73,9 @@ def train_npe_session(
         embedding_net=embedding_net,
     )
 
-    if hasattr(prior_theta, "to"):
-        prior_theta.to(dev)
-
-    # dummy batch to build the density estimator (shape inference)
-    theta_dummy, x_dummy = simulate_training_sessions(
+def _simulate_dummy_batch(cfg, prior_theta, *, dev: torch.device, seed: int, T: int, P: int):
+    """Simulate a small batch used to initialize estimator input shapes."""
+    return simulate_training_sessions(
         prior_theta,
         num_sessions=2,
         num_trials=T,
@@ -100,6 +85,42 @@ def train_npe_session(
         P=P,
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=int(seed),
+    )
+
+# ---------------------------------------------------------------------
+# NPE training
+# ---------------------------------------------------------------------
+
+def train_npe_session(
+    cfg,
+    prior_theta,
+    *,
+    device: str = "cpu",
+    seed: int = 0,
+):
+    """
+    Train an amortized NPE posterior on simulated RT-choice sessions.
+    Simulates session batches on the fly and returns the fitted estimator and DirectPosterior.
+    """
+    dev = torch.device(device)
+    torch.manual_seed(int(seed))
+
+    P = max_num_pulses()
+    T = int(cfg.NUM_TRIALS_OBS)
+
+    embedding_net = _build_npe_embedding_net(cfg, T=T, P=P).to(dev)
+    est_builder = _build_npe_estimator_builder(cfg, embedding_net)
+
+    if hasattr(prior_theta, "to"):
+        prior_theta.to(dev)
+
+    theta_dummy, x_dummy = _simulate_dummy_batch(
+        cfg,
+        prior_theta,
+        dev=dev,
+        seed=int(seed),
+        T=T,
+        P=P,
     )
     theta_dummy = theta_dummy.to(dev, dtype=torch.float32)
     x_dummy = x_dummy.to(dev, dtype=torch.float32)
@@ -144,10 +165,10 @@ def train_npe_session(
         optimizer.step()
 
         li = float(loss.item())
-        ema = li if ema is None else ema_beta * ema + (1 - ema_beta) * li
+        ema = li if ema is None else ema_beta * ema + (1.0 - ema_beta) * li
 
         if (step + 1) % 50 == 0:
-            print(f"step {step+1}: loss={li:.4f} ema={ema:.4f}")
+            print(f"step {step + 1}: loss={li:.4f} ema={ema:.4f}")
 
             if ema < best - min_delta:
                 best = ema
@@ -155,18 +176,21 @@ def train_npe_session(
             else:
                 bad += 1
                 if bad >= patience:
-                    print(f"[NPE] early stop at step {step+1}")
+                    print(f"[NPE] early stop at step {step + 1}")
                     break
 
     posterior = DirectPosterior(density_estimator, prior_theta)
     return density_estimator, posterior
 
 
+# ---------------------------------------------------------------------
+# Posterior inference
+# ---------------------------------------------------------------------
+
 def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta):
     """
-    Direct posterior sampling from the amortized NPE posterior.
-
-    x_o_flat must be shaped (1, T*(2+P+1)) and include mask.
+    Draw posterior samples from the amortized NPE model for one observed session.
+    Expects x_o_flat to match the flattened training representation used during fitting.
     """
     posterior = inference_obj.build_posterior(
         density_estimator=density_estimator,
@@ -187,23 +211,24 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
     )
     return samples
 
+# ---------------------------------------------------------------------
+# SBC utilities
+# ---------------------------------------------------------------------
 
 def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
-    """
-    SBC rank for each dimension:
-      rank_d = #{s in posterior_samples[:, d] : s < theta_true[d]}
-    """
+    """Compute SBC ranks for each parameter dimension."""
     theta_true = theta_true.view(-1)
     return (posterior_samples < theta_true[None, :]).sum(dim=0).to(torch.int64)
 
 
 def _plot_sbc_rank_histograms(
-    ranks: np.ndarray,  # (num_datasets, D)
+    ranks: np.ndarray,
     *,
     param_names: Sequence[str],
     outpath: Optional[str] = None,
     bins: int = 30,
 ):
+    """Plot per-parameter SBC rank histograms."""
     D = ranks.shape[1]
     fig, axes = plt.subplots(D, 1, figsize=(8, 2.5 * D), constrained_layout=True)
     if D == 1:
@@ -238,8 +263,8 @@ def run_sbc_npe(
     plot_bins: int = 30,
 ) -> dict:
     """
-    SBC for the NPE pipeline. Simulation and posterior sampling run on `device`;
-    results are moved to CPU for saving/plotting.
+    Run simulation-based calibration for the NPE pipeline.
+    Simulates datasets from the prior, samples posteriors, and saves rank diagnostics.
     """
     os.makedirs(outdir, exist_ok=True)
 

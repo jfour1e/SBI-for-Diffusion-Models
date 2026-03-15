@@ -27,7 +27,7 @@ def main():
 
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
-    trial_dim = 2 + P + 1
+    trial_dim = 2 + P
     print(f"P={P}, T={T}, trial_dim={trial_dim}")
 
     prior_theta = build_prior_theta()
