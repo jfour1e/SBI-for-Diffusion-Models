@@ -59,6 +59,30 @@ def generate_pulses_torch(
     s = torch.where(is_correct, correct_side[:, None], -correct_side[:, None])
     return s.to(dtype)
 
+def mask_unperceived_pulses(
+    pulse_sides: Tensor,
+    rt: Tensor,
+    pulse_interval: float = float(PULSE_INTERVAL),
+) -> Tensor:
+    """
+    Set pulse entries to NaN for any pulse the animal could not have perceived.
+    """
+    N, P = pulse_sides.shape
+    pulse_times = torch.arange(P, device=pulse_sides.device, dtype=torch.float32) * pulse_interval
+    unperceived = pulse_times.unsqueeze(0) > rt.to(pulse_sides.device).unsqueeze(1)  # (N, P)
+    out = pulse_sides.clone()
+    out[unperceived] = float("nan")
+    return out
+
+
+def pack_x_rt_choice(rt_choice: Tensor, *, log_rt: bool) -> Tensor:
+    rt = rt_choice[:, 0:1].to(torch.float32).clamp_min(1e-6)
+    if log_rt:
+        rt = torch.log(rt)
+    choice = rt_choice[:, 1:2].to(torch.int64)
+    return torch.cat([rt, choice.to(torch.float32)], dim=1)
+
+
 # ---------------- OU transition and coarse loop ----------------
 def _ou_transition_params(
     lam: Tensor, dt: float, sigma: float,
@@ -310,26 +334,3 @@ def simulate_rt_choice_batch(
     rt = (tau + decision_time).clamp(1e-6, float(T_MAX))
     x = torch.stack([rt, choice.to(dtype)], dim=-1)
     return x, hit, s
-
-def mask_unperceived_pulses(
-    pulse_sides: Tensor,
-    rt: Tensor,
-    pulse_interval: float = float(PULSE_INTERVAL),
-) -> Tensor:
-    """
-    Set pulse entries to NaN for any pulse the animal could not have perceived.
-    """
-    N, P = pulse_sides.shape
-    pulse_times = torch.arange(P, device=pulse_sides.device, dtype=torch.float32) * pulse_interval
-    unperceived = pulse_times.unsqueeze(0) > rt.to(pulse_sides.device).unsqueeze(1)  # (N, P)
-    out = pulse_sides.clone()
-    out[unperceived] = float("nan")
-    return out
-
-
-def pack_x_rt_choice(rt_choice: Tensor, *, log_rt: bool) -> Tensor:
-    rt = rt_choice[:, 0:1].to(torch.float32).clamp_min(1e-6)
-    if log_rt:
-        rt = torch.log(rt)
-    choice = rt_choice[:, 1:2].to(torch.int64)
-    return torch.cat([rt, choice.to(torch.float32)], dim=1)
