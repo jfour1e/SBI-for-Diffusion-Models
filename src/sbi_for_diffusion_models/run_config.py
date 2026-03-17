@@ -1,44 +1,55 @@
 from __future__ import annotations
 from dataclasses import dataclass 
 
+# defines constants used in the SBI for Diffusion Models project
+DT = 1e-6
+DT_CHOICE = 5e-4
+DT_INTERNAL = 0.01
+FLASH_DURATION = 0.020     
+T_MAX = 8.0
+PULSE_INTERVAL = 0.230 # in seconds (i.e., 230 ms)
+
+# regeneration tolerance 
+MAX_TIMEOUT_TRIES = 20
+TIMEOUT_FRAC_ALLOWED = 0.20
+
 @dataclass(frozen=True)
 class RunConfig:
-    # Data / simulator settings
+# Data / simulator settings
     MU_SENSORY: float = 1.0
-    P_SUCCESS: float = 0.75
-
-    # Training settings
-    NUM_SIMULATIONS: int = 10_000
-    TRAIN_BATCH_SIZE: int = 4096
-
-    # Start small; likelihood approximation bias can explode when summing over many trials.
-    NUM_TRIALS_OBS : int = 50
+    P_SUCCESS: float = 0.6
+    NUM_TRIALS_OBS : int = 256
 
     # We recommend log-transforming RT but NOT the categorical choice.
-    LOG_RT_MANUALLY: bool = False
-
-    """
-    If your sbi version supports log_transform_x for MNLE (log RT but not choice),
-    you can set LOG_RT_MANUALLY=False and SBI_LOG_TRANSFORM_X=True
-    """
-    SBI_LOG_TRANSFORM_X: bool = True
-    Z_SCORE_X: str | None = "independent"
-
-    # MCMC settings
-    NUM_CHAINS: int = 2
-    WARMUP_STEPS: int = 100
-    POSTERIOR_SAMPLES: int = 1000
-
-    """
-    Optional likelihood tempering for debugging only (1.0 = true posterior).
-    If you see crazy posteriors at large NUM_TRIALS_OBS, try TEMPERATURE=10 or 100 to diagnose.
-    """
-    TEMPERATURE: float = 1.0
+    LOG_RT_MANUALLY: bool = True
     THETA_TRUE_FROM_PRIOR: bool = True
 
-    # SBC settings 
-    SBC_NUM_DATASETS: int = 10 
-    SBC_POST_SAMPLES: int = 1500
+    # NPE settings
+    NPE_NUM_SESSIONS: int = 20
+    NPE_TRAIN_BATCH_SIZE: int = 512
+    NPE_HIDDEN_FEATURES: int = 128
+    NPE_NUM_TRANSFORMS: int = 5
+    NPE_NUM_BINS: int = 8
+    NPE_SESSIONS_PER_STEP: int = 64
+    NPE_NUM_STEPS: int = 150
+    NPE_LR: float = 5e-4
+
+    # Embedding network (DeepSets)
+    NPE_TRIAL_NET_HIDDEN: int = 128
+    NPE_TRIAL_NET_LAYERS: int = 3
+    NPE_TRIAL_NET_OUTPUT_DIM: int = 64
+    NPE_AGG_FN: str = "mean"
+    NPE_POST_AGG_HIDDEN: int = 128
+    NPE_POST_AGG_LAYERS: int = 2
+    NPE_EMBEDDING_OUTPUT_DIM: int = 64
+
+    # NPE inference
+    NPE_POSTERIOR_SAMPLES: int = 20000
+
+    # NPE SBC
+    RUN_SBC: bool = True
+    NPE_SBC_NUM_DATASETS: int = 5
+    NPE_SBC_POST_SAMPLES: int = 200
 
 
 RUN_CONFIG_PARAMS = RunConfig()

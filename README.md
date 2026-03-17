@@ -1,129 +1,142 @@
 # SBI-for-Diffusion-Models
 
-We implement simulation-based inference (SBI) for pulse-based Drift–Diffusion Models (DDMs) using neural likelihood estimation (MNLE) and Bayesian inference with MCMC. 
+Simulation-based inference (SBI) for a **pulse-based drift–diffusion model** using session-level Neural Posterior Estimation (NPE). 
 
-We use:
+This repo is designed for **amortized inference**: train once on many simulated sessions, then sample posteriors quickly for new sessions **without MCMC**.
 
-- PyTorch for simulation and neural networks
-- **['sbi (v0.25.0)'](https://github.com/sbi-dev/sbi)** for neural likelihoods and MCMC
-- **[`uv`](https://github.com/astral-sh/uv)** for virtual enviroment handling 
+The project uses **[`uv`](https://github.com/astral-sh/uv)** for fast, reproducible Python environments (shout out Ryan for this one). 
 ---
 
-## Installing `uv`
+## What’s implemented
 
-### macOS
+### Simulator (PyTorch)
+- Pulse-based accumulator model with:
+  - OU noise between pulses
+  - Pulse “kicks” at fixed intervals
+  - Absorbing bounds (0 and `B`)
+  - Non-decision time `tau`
+- Generates per-trial outputs:
+  - `rt` (reaction time)
+  - `choice` (0/1)
+  - `hit` mask (timeout vs. decision)
+  - pulse sequence `s` (±1)
+
+### Session formatting
+- Each session contains `T` trials.
+- Trials that timeout are retried
+
+Final flattened representation:
+- `x_session`: shape `(N_sessions, T * (2 + P + 1))`
+  - `2` = `[rt, choice]`
+  - `P` = pulses per trial
+
+### NPE / MNPE model (sbi)
+- `sbi` NPE with an NSF flow (`posterior_nn(model="nsf")`)
+- Custom embedding: `MaskAwarePermutationInvariantEmbedding`
+  - embeds each trial (excluding mask)
+  - multiplies by mask
+  - aggregates across trials (mean or sum)
+
+## Requirements
+
+- Python **>= 3.10**
+- `uv` (package & environment manager)
+
+---
+
+## Installation
+
+### Install UV on macOS 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 ### Create Virtual Environment 
 ```bash 
-uv .venv
-source venv/bin/activate
+uv venv .venv
+source .venv/bin/activate
 ```
 
 ### Install Dependencies 
 ```bash
+uv pip install -e . 
 uv sync 
 ```
+
+### Add dependencies 
+```bash 
+uv add numpy pandas matplotlib torch sbi
+```
+
+This section describes the full **session-level NPE (Neural Posterior Estimation)** workflow for the pulse-based RT–choice model.
+
+Unlike MNLE, this pipeline **does NOT learn a likelihood** and **does NOT use MCMC**.
+
+Instead, NPE learns an amortized posterior:
+\[
+p(\theta \mid x)
+\]
+
+which allows **direct posterior sampling** from observed session data without any iterative inference procedure.
+
+The full workflow consists of:
+
+1. Simulate session-level training data
+2. Train neural posterior estimator (NPE)
+3. Simulate an observed dataset
+4. Perform direct posterior sampling
+5. Perform Simulation-Based Calibration (SBC)
+
+Run:
+
+- **rt_choice_pipeline_mnpe.py**  
+to train a neural posterior estimator from scratch and run inference
+
+or
+
+- **rt_choice_pipeline_mnpe_from_pretrained.py**  
+to load a pretrained posterior model and run inference only.
+
 ---
 
-## Basic usage 
+## Configuration
 
-1. Simulate Training Dataset 
-```python 
+All experiment parameters live in:
 
-n_max, steps_per_pulse = pulse_schedule()
-P = n_pulses_max_from_schedule(n_max, steps_per_pulse)
+src/sbi_for_diffusion_models/run_config.py
 
-# define prior over Theta 
-prior_theta = build_prior_theta()
+Key MNLE controls:
 
-# Define training proposals over Theta 
-pulse_prop = PulseSequenceProposal(P=P, p_success=cfg.P_SUCCESS, seed=0,device="cpu")
-proposal_z = ExtendedProposal(theta_prior=prior_theta, pulse_proposal=pulse_prop, device="cpu")
+| Parameter | Description |
+|----------|-------------|
+| `NPE_NUM_SESSIONS` | Number of simulated training sessions |
+| `NUM_TRIALS_OBS` | Trials per observed dataset |
+| `NPE_TRAIN_BATCH_SIZE` | Neural posterior training batch size |
+| `NPE_HIDDEN_FEATURES` | Flow network hidden dimension |
+| `NPE_NUM_TRANSFORMS` | Number of NSF flow transforms |
+| `NPE_NUM_BINS` | Spline bins per transform |
+| `NPE_EMBEDDING_OUTPUT_DIM` | Session embedding dimension |
+| `NPE_POSTERIOR_SAMPLES` | Number of posterior samples drawn at inference |
+| `RUN_SBC` | Enable Simulation-Based Calibration |
+| `NPE_SBC_NUM_DATASETS` | Number of SBC datasets |
+| `NPE_SBC_POST_SAMPLES` | Posterior samples per SBC dataset |
 
-# Simulate Training data 
-z_train, x_train = simulate_training_set_with_conditions(
-    proposal=proposal_z,
-    num_simulations=cfg.NUM_SIMULATIONS,
-    batch_size=cfg.TRAIN_BATCH_SIZE,
-    device="cpu",
-    mu_sensory=cfg.MU_SENSORY,
-    p_success=cfg.P_SUCCESS,
-    P=P,
-    log_rt=cfg.LOG_RT_MANUALLY,
-)
+---
 
-# Summarize trial data 
-summarize_trials("train (sample)", x_train[torch.randperm(len(x_train))[:50_000]])
-```
+## Summary
 
-2. Train neural likelihood (MNLE)
-```python 
-density_estimator = train_mnle(cfg, proposal_z, z_train, x_train, device="cpu")
+The NPE pipeline consists of:
 
-# Save trained neural network (still working on function for this)
-save_model(density_estimator, cfg)
+1. Simulating session-level training datasets from the pulse-based RT-choice model  
+2. Embedding session data using a permutation-invariant DeepSets architecture  
+3. Training a neural posterior estimator via Neural Posterior Estimation (NPE)  
+4. Performing **direct posterior sampling** from observed session data  
+5. Verifying posterior calibration using Simulation-Based Calibration (SBC)
 
-# Simulate Observed Session 
-theta_true = prior_theta.sample((1,)).view(5)
+This approach provides:
 
-x_o, pulses_o = simulate_observed_session(
-    theta_true,
-    num_trials=cfg.NUM_TRIALS_OBS,
-    device="cpu",
-    mu_sensory=cfg.MU_SENSORY,
-    p_success=cfg.P_SUCCESS,
-    P=P,
-    seed=123,
-    log_rt=cfg.LOG_RT_MANUALLY,
-)
-```
-
-3. Inference ONLY, load saved model: 
-```python 
-# Working on function for this too 
-density_estimator = load_model(cfg, proposal_z, device="cpu")
-
-# run Inference - can be done after training or in isolation 
-samples = run_inference_mcmc(cfg, prior_theta, density_estimator, x_o, pulses_o)
-```
-
-4. Simulation-based Calibration (SBC)
-To verify posterior correctness, run SBC: 
-```python 
-run_sbc(
-    cfg,
-    prior_theta=prior_theta,
-    density_estimator=density_estimator,
-    device="cpu",
-    num_datasets=cfg.SBC_NUM_DATASETS,
-    posterior_samples_per_dataset=cfg.SBC_POST_SAMPLES,
-    seed=0,
-    param_names=("a0", "lam", "v", "B", "tau"),
-    outdir=sbc_outdir,
-    plot_bins=30,
-)
-```
-This performs repeated cycles of:
-
-- Sample $\theta$ ~ prior
-- Simulate dataset
-- Run MCMC posterior
-- Compute rank statistics
-- Plot rank histograms
-
-Uniform rank histograms indicate well-calibrated inference.
-
-## Configuration 
-All experiment parameters live in sbi_for_diffusion_models/run_config.py
-
-Key controls include 
-```bash 
-NUM_SIMULATIONS      # MNLE training size
-NUM_TRIALS_OBS       # Trials per dataset
-POSTERIOR_SAMPLES    # MCMC samples
-SBC_NUM_DATASETS     # Number of SBC repetitions
-SBC_POST_SAMPLES     # MCMC samples per SBC dataset
-```
+- Fully amortized posterior inference  
+- Direct sampling from \( p(\theta \mid x) \)  
+- Support for variable effective trial counts (timeouts handled internally)  
+- Orders-of-magnitude faster inference than MCMC  
+- SBC diagnostics for posterior calibration  

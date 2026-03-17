@@ -1,111 +1,244 @@
-import os
-import numpy as np
 import torch
-import matplotlib.pyplot as plt
-
-from torch.distributions import Distribution
+from typing import Optional, Callable
+import math 
 
 from sbi_for_diffusion_models.models.rt_choice_model import (
-    rt_choice_model_simulator_torch, 
-    pack_x_rt_choice, 
-    generate_pulse_matrix_numpy
+    pack_x_rt_choice,
+    generate_pulses_torch,
 )
+from .run_config import T_MAX, MAX_TIMEOUT_TRIES, TIMEOUT_FRAC_ALLOWED
 
-def sim_wrapper(
-    theta_and_pulses: torch.Tensor, *, mu_sensory: float, p_success: float, P: int, log_rt: bool
+@torch.no_grad()
+def simulate_training_sessions(
+    prior_theta,
+    num_sessions: int,
+    num_trials: int,
+    *,
+    simulate_batch_fn: Callable,
+    device: torch.device,
+    mu_sensory: float,
+    p_success: float,
+    P: int,
+    log_rt: bool,
+    seed: int = 0,
+    theta: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Simulate session-level training data for NPE.
+
+    Each session:
+      - choose theta (either sampled from prior_theta, or provided via `theta`)
+      - generate pulses (T,P)
+      - simulate T trials with simulate_batch_fn
+      - pack x as [rt, choice]
+      - concatenate per-trial features as [rt, choice, pulse_1..pulse_P] 
+      - flatten to (T*(2+P),)
+    """
+    N = int(num_sessions)
+    T = int(num_trials)
+    P = int(P)
+    trial_dim = 2 + P
+
+    torch.manual_seed(int(seed))
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed))
+
+    # infer theta dim from passed in theta or prior draw
+    if theta is not None:
+        theta_tmp = torch.as_tensor(theta, device=device, dtype=torch.float32)
+        if theta_tmp.ndim == 1:
+            D = int(theta_tmp.shape[0])
+        elif theta_tmp.ndim == 2:
+            D = int(theta_tmp.shape[1])
+        else:
+            raise ValueError(
+                f"theta must have shape (D,) or (N,D); got {tuple(theta_tmp.shape)}"
+            )
+    else:
+        theta_tmp = torch.as_tensor(
+            prior_theta.sample((1,)),
+            device=device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        D = int(theta_tmp.numel())
+
+    theta_all = torch.empty((N, D), device=device, dtype=torch.float32)
+    x_all = torch.empty((N, T * trial_dim), device=device, dtype=torch.float32)
+
+    # Normalize optional fixed theta to shape (N, D)
+    theta_fixed: Optional[torch.Tensor] = None
+    if theta is not None:
+        theta = torch.as_tensor(theta, device=device, dtype=torch.float32)
+
+        if theta.ndim == 1:
+            if theta.shape[0] != D:
+                raise ValueError(
+                    f"theta must have shape ({D},) or ({N},{D}); got {tuple(theta.shape)}"
+                )
+            theta_fixed = theta.view(1, D).expand(N, D)
+
+        elif theta.ndim == 2:
+            if theta.shape != (N, D):
+                raise ValueError(
+                    f"theta must have shape ({N},{D}); got {tuple(theta.shape)}"
+                )
+            theta_fixed = theta
+
+        else:
+            raise ValueError(
+                f"theta must have shape ({D},) or ({N},{D}); got {tuple(theta.shape)}"
+            )
+
+    allowed_timeouts = math.ceil(TIMEOUT_FRAC_ALLOWED * T)
+    
+    for i in range(N):
+        # Sample theta or use fixed
+        if theta_fixed is None:
+            theta_i = torch.as_tensor(
+                prior_theta.sample((1,)),
+                device=device,
+                dtype=torch.float32,
+            ).reshape(-1)
+
+            if theta_i.numel() != D:
+                raise RuntimeError(
+                    f"Prior returned theta with dim {theta_i.numel()}, expected {D}."
+                )
+        else:
+            theta_i = theta_fixed[i]
+
+        theta_all[i] = theta_i
+
+        # Initial draw of pulses 
+        pulses = generate_pulses_torch(
+            n_trials=T,
+            n_pulses=P,
+            p_success=float(p_success),
+            device=device,
+            dtype=torch.float32,
+            generator=gen,
+        )
+
+        # Initial simulation of all T trial
+        theta_rep = theta_i.view(1, D).expand(T, D)
+
+        x_raw, hit, _ = simulate_batch_fn(
+            theta_rep,
+            mu_sensory=float(mu_sensory),
+            pulse_sides=pulses,
+            p_success=float(p_success),
+            pulse_generator=gen,
+        )
+            
+        # retry only timeout trials    
+        tries_used = torch.zeros((T,), device=device, dtype=torch.int64)
+
+        while True:
+            retry_mask = (~hit) & (tries_used < int(MAX_TIMEOUT_TRIES))
+            idx = retry_mask.nonzero(as_tuple=False).squeeze(1)
+
+            if idx.numel() == 0:
+                break
+
+            M = int(idx.numel())
+
+            # Same theta_i, repeated only for the timed-out subset
+            theta_sub = theta_i.view(1, D).expand(M, D)  # (M, D)
+
+            # Fresh pulse draws for only the timed-out trials
+            pulses_sub = generate_pulses_torch(
+                n_trials=M,
+                n_pulses=P,
+                p_success=float(p_success),
+                device=device,
+                dtype=torch.float32,
+                generator=gen,
+            )
+
+            # Simulate only the subset that timed out
+            x_new, hit_new, _ = simulate_batch_fn(
+                theta_sub,
+                mu_sensory=float(mu_sensory),
+                pulse_sides=pulses_sub,
+                p_success=float(p_success),
+                pulse_generator=gen,
+            )
+
+            # Write subset results back into full-session tensors
+            x_raw.index_copy_(0, idx, x_new)
+            hit.index_copy_(0, idx, hit_new)
+            pulses.index_copy_(0, idx, pulses_sub)
+
+            # Mark that these trials consumed one retry attempt
+            tries_used.index_add_(
+                0,
+                idx,
+                torch.ones((M,), device=device, dtype=torch.int64),
+            )
+
+        # Prior predictive timeout check after all retries exhausted
+
+        not_hit = ~hit
+        n_timeouts = int(not_hit.sum().item())
+
+        if n_timeouts > allowed_timeouts:
+            frac = n_timeouts / max(1, T)
+            raise RuntimeError(
+                f"[prior predictive check failed] Too many timeout trials after retries.\n"
+                f"Session {i}: timeouts={n_timeouts}/{T} ({frac:.1%}), "
+                f"allowed={allowed_timeouts}/{T} ({TIMEOUT_FRAC_ALLOWED:.0%}).\n"
+                f"MAX_TIMEOUT_TRIES={int(MAX_TIMEOUT_TRIES)}\n"
+                f"This likely indicates a bad prior (e.g., drift too small, bounds too large, "
+                f"tau too close to T_MAX, etc.). Choose a better prior."
+            )
+        
+        # force boundary hit for remaining trials
+        if n_timeouts > 0:
+            idx = not_hit.nonzero(as_tuple=False).squeeze(1)
+            M = int(idx.numel())
+
+            forced_rt = torch.full(
+                (M, 1),
+                float(T_MAX),
+                device=device,
+                dtype=torch.float32,
+            )
+            forced_choice = torch.randint(
+                0, 2,
+                (M, 1),
+                device=device,
+                generator=gen,
+                dtype=torch.int64,
+            ).to(torch.float32)
+
+            x_forced = torch.cat([forced_rt, forced_choice], dim=1)
+            x_raw.index_copy_(0, idx, x_forced)
+
+        # pack [rt, choice]
+        x_packed = pack_x_rt_choice(x_raw, log_rt=bool(log_rt))  # (T, 2)
+
+        out = x_all[i].view(T, trial_dim)
+        out[:, :2].copy_(x_packed)
+        out[:, 2:].copy_(pulses)
+
+    return theta_all, x_all
+
+
+def flatten_observed_session(
+    x_o: torch.Tensor,
+    pulses_o: torch.Tensor,
+    mask_o: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Simulator wrapper that expects concatenated z = [theta(5), pulse_sides(P)].
-    Returns packed x = [rt(or log rt), choice].
+    Flatten an observed session into a single row for NPE inference.
+
+    Args:
+      x_o: (T,2) packed [rt, choice]
+      pulses_o: (T,P)
+      mask_o: (T,1) float in {0,1}
+
+    Returns:
+      (1, T*(2+P+1))
     """
-    theta = theta_and_pulses[:, :5]
-    pulse_sides = theta_and_pulses[:, 5 : 5 + P]
-
-    rt_choice = rt_choice_model_simulator_torch(
-        theta,
-        mu_sensory=mu_sensory,
-        pulse_sides=pulse_sides,
-        p_success=p_success,  # not used if pulse_sides provided; safe
-    )
-    return pack_x_rt_choice(rt_choice, log_rt=log_rt)
-
-
-@torch.no_grad()
-def simulate_training_set_with_conditions(
-    proposal: Distribution,
-    num_simulations: int,
-    batch_size: int,
-    device,
-    *,
-    mu_sensory: float,
-    p_success: float,
-    P: int,
-    log_rt: bool,
-):
-    zs = []
-    xs = []
-
-    for start in range(0, num_simulations, batch_size):
-        bs = min(batch_size, num_simulations - start)
-        z = proposal.sample((bs,)).to(device=device, dtype=torch.float32)
-        x = sim_wrapper(z, mu_sensory=mu_sensory, p_success=p_success, P=P, log_rt=log_rt)
-
-        zs.append(z.detach().cpu())
-        xs.append(x.detach().cpu())
-
-        if (start // batch_size) % 50 == 0:
-            print(f"Simulated {start + bs:,}/{num_simulations:,}")
-
-    z_all = torch.cat(zs, dim=0).to(torch.float32)
-    x_all = torch.cat(xs, dim=0).to(torch.float32)
-
-    assert z_all.shape[0] == num_simulations
-    assert x_all.shape[0] == num_simulations
-    assert torch.isfinite(z_all).all()
-    assert torch.isfinite(x_all).all()
-    assert torch.all((x_all[:, -1] == 0) | (x_all[:, -1] == 1) | (x_all[:, -1] == 2))
-
-    print("Training x shape:", tuple(x_all.shape), " (N,2) = [rt(or log rt), choice]")
-    print("Training z shape:", tuple(z_all.shape), " (N, 5+P) = [theta, pulses]")
-    print("Unique outcomes in training (choice):", x_all[:, -1].unique().tolist())
-    return z_all, x_all
-
-
-@torch.no_grad()
-def simulate_observed_session(
-    theta_true: torch.Tensor,
-    num_trials: int,
-    device,
-    *,
-    mu_sensory: float,
-    p_success: float,
-    P: int,
-    seed: int = 123,
-    log_rt: bool,
-):
-    rng = np.random.default_rng(seed)
-    s_np = generate_pulse_matrix_numpy(rng, n_trials=num_trials, n_pulses=P, p_success=p_success)
-    pulses_o = torch.from_numpy(s_np).to(device=device, dtype=torch.float32)
-
-    theta_rep = theta_true.view(1, 5).repeat(num_trials, 1)
-    rt_choice = rt_choice_model_simulator_torch(
-        theta_rep,
-        mu_sensory=mu_sensory,
-        pulse_sides=pulses_o,
-        p_success=p_success,
-    )
-    x_o = pack_x_rt_choice(rt_choice, log_rt=log_rt)
-
-    return x_o.detach().cpu(), pulses_o.detach().cpu()
-
-
-def summarize_trials(name: str, x: torch.Tensor) -> None:
-    rt = x[:, 0]
-    choice = x[:, 1].to(torch.int64)
-    counts = torch.bincount(choice, minlength=3)
-    frac = counts.float() / counts.sum().clamp_min(1)
-    print(
-        f"{name}: n={len(x)}  "
-        f"rt[min,max]=({rt.min().item():.4f},{rt.max().item():.4f})  "
-        f"choice counts={counts.tolist()}  frac={frac.tolist()}"
-    )
+    trial_features = torch.cat([x_o, pulses_o, mask_o], dim=-1)  # (T, 2+P+1)
+    return trial_features.reshape(1, -1).to(torch.float32)
