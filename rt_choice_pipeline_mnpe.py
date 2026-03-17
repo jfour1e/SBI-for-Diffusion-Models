@@ -9,10 +9,11 @@ torch.distributions.Distribution.set_default_validate_args(False)
 
 from sbi.analysis import pairplot
 
-from sbi_for_diffusion_models.priors import build_prior_theta
-from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
-from sbi_for_diffusion_models.mnpe import train_npe_session, run_inference_npe, run_sbc_npe
+from sbi_for_diffusion_models.priors import build_prior_theta_lapse, build_prior_theta
+from sbi_for_diffusion_models.models.lapse_rt_choice_model import simulate_rt_choice_batch_lapse
+from sbi_for_diffusion_models.models.rt_choice_model import simulate_rt_choice_batch, max_num_pulses
 from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
+from sbi_for_diffusion_models.mnpe import train_npe_session, run_inference_npe, run_sbc_npe
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 
 cfg = RUN_CONFIG_PARAMS
@@ -30,27 +31,52 @@ def main():
     trial_dim = 2 + P
     print(f"P={P}, T={T}, trial_dim={trial_dim}")
 
-    prior_theta = build_prior_theta()
+    # --------------------------------------------------
+    # Choose model family here
+    # --------------------------------------------------
+    model_name = "lapse"  
+
+    if model_name == "base":
+        simulate_batch_fn = simulate_rt_choice_batch
+        prior_theta = build_prior_theta()
+        param_names = ("a0", "lam", "v", "B", "tau")
+        model_tag = "base"
+    elif model_name == "lapse":
+        simulate_batch_fn = simulate_rt_choice_batch_lapse
+        prior_theta = build_prior_theta_lapse()
+        param_names = ("a0", "lam", "v", "B", "tau", "p_lapse")
+        model_tag = "lapse"
+    else:
+        raise ValueError(f"Unknown model_name={model_name}")
+
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
 
     # train
     print("\n--- Training NPE ---")
     density_estimator, posterior_obj = train_npe_session(
-        cfg, prior_theta, device=device, seed=0
+        cfg,
+        prior_theta,
+        simulate_batch_fn=simulate_batch_fn,
+        device=device,
+        seed=0,
     )
     print("density_estimator device:", next(density_estimator.parameters()).device)
 
     model_dir = os.path.expanduser("~/models")
     os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, "npe_rt_choice.pt")
+    model_path = os.path.join(model_dir, f"npe_rt_choice_{model_tag}.pt")
     torch.save({"state_dict": density_estimator.state_dict(), "config": cfg}, model_path)
     print("Saved NPE model to:", model_path)
 
     # simulate observed session
     print("\n--- Simulating observed session ---")
     if bool(cfg.THETA_TRUE_FROM_PRIOR):
-        theta_true = prior_theta.sample((1,)).view(5).to(device=dev, dtype=torch.float32)
+        theta_true = torch.as_tensor(
+            prior_theta.sample((1,)),
+            device=dev,
+            dtype=torch.float32,
+        ).reshape(-1)
     else:
         raise ValueError("Set THETA_TRUE_FROM_PRIOR=True or provide your own theta_true.")
 
@@ -58,6 +84,7 @@ def main():
         prior_theta=prior_theta,
         num_sessions=1,
         num_trials=T,
+        simulate_batch_fn=simulate_batch_fn,
         device=dev,
         mu_sensory=float(cfg.MU_SENSORY),
         p_success=float(cfg.P_SUCCESS),
@@ -85,7 +112,7 @@ def main():
     ).detach().cpu()
     
     # save outputs
-    outdir = os.environ.get("OUTDIR", "npe_outputs")
+    outdir = os.environ.get("OUTDIR", f"npe_outputs_{model_tag}")
     os.makedirs(outdir, exist_ok=True)
 
     npy_path = os.path.join(outdir, "posterior_samples_theta.npy")
@@ -94,8 +121,8 @@ def main():
 
     fig, ax = pairplot(
         samples,
-        points=theta_true.detach().cpu().view(1, -1),
-        labels=["a0", "lam", "v", "B", "tau"],
+        points=theta_true.detach().cpu().reshape(1, -1),
+        labels=list(param_names),
         points_colors="r",
     )
     fig_path = os.path.join(outdir, "pairplot_theta.png")
@@ -112,11 +139,12 @@ def main():
             cfg,
             prior_theta=prior_theta,
             posterior=posterior_obj,
+            simulate_batch_fn=simulate_batch_fn,
             device=device,
             num_datasets=int(cfg.NPE_SBC_NUM_DATASETS),
             posterior_samples_per_dataset=int(cfg.NPE_SBC_POST_SAMPLES),
             seed=0,
-            param_names=("a0", "lam", "v", "B", "tau"),
+            param_names=param_names,
             outdir=sbc_dir,
             plot_bins=30,
         )

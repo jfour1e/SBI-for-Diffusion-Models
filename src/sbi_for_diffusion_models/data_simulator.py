@@ -1,9 +1,8 @@
 import torch
-from typing import Optional, Tuple 
+from typing import Optional, Callable
 import math 
 
 from sbi_for_diffusion_models.models.rt_choice_model import (
-    simulate_rt_choice_batch,
     pack_x_rt_choice,
     generate_pulses_torch,
 )
@@ -15,13 +14,14 @@ def simulate_training_sessions(
     num_sessions: int,
     num_trials: int,
     *,
+    simulate_batch_fn: Callable,
     device: torch.device,
     mu_sensory: float,
     p_success: float,
     P: int,
     log_rt: bool,
     seed: int = 0,
-    theta: Optional[torch.Tensor] = None, 
+    theta: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Simulate session-level training data for NPE.
@@ -29,7 +29,7 @@ def simulate_training_sessions(
     Each session:
       - choose theta (either sampled from prior_theta, or provided via `theta`)
       - generate pulses (T,P)
-      - simulate T trials with simulate_rt_choice_batch
+      - simulate T trials with simulate_batch_fn
       - pack x as [rt, choice]
       - concatenate per-trial features as [rt, choice, pulse_1..pulse_P] 
       - flatten to (T*(2+P),)
@@ -43,32 +43,69 @@ def simulate_training_sessions(
     gen = torch.Generator(device=device)
     gen.manual_seed(int(seed))
 
-    theta_all = torch.empty((N, 5), device=device, dtype=torch.float32)
+    # infer theta dim from passed in theta or prior draw
+    if theta is not None:
+        theta_tmp = torch.as_tensor(theta, device=device, dtype=torch.float32)
+        if theta_tmp.ndim == 1:
+            D = int(theta_tmp.shape[0])
+        elif theta_tmp.ndim == 2:
+            D = int(theta_tmp.shape[1])
+        else:
+            raise ValueError(
+                f"theta must have shape (D,) or (N,D); got {tuple(theta_tmp.shape)}"
+            )
+    else:
+        theta_tmp = torch.as_tensor(
+            prior_theta.sample((1,)),
+            device=device,
+            dtype=torch.float32,
+        ).reshape(-1)
+        D = int(theta_tmp.numel())
+
+    theta_all = torch.empty((N, D), device=device, dtype=torch.float32)
     x_all = torch.empty((N, T * trial_dim), device=device, dtype=torch.float32)
 
-    # Optional fixed theta 
+    # Normalize optional fixed theta to shape (N, D)
     theta_fixed: Optional[torch.Tensor] = None
     if theta is not None:
-        theta = theta.to(device=device, dtype=torch.float32)
+        theta = torch.as_tensor(theta, device=device, dtype=torch.float32)
+
         if theta.ndim == 1:
-            if theta.shape[0] != 5:
-                raise ValueError(f"theta must have shape (5,) or (N,5); got {tuple(theta.shape)}")
-            theta_fixed = theta.view(1, 5).expand(N, 5)
+            if theta.shape[0] != D:
+                raise ValueError(
+                    f"theta must have shape ({D},) or ({N},{D}); got {tuple(theta.shape)}"
+                )
+            theta_fixed = theta.view(1, D).expand(N, D)
+
         elif theta.ndim == 2:
-            if theta.shape != (N, 5):
-                raise ValueError(f"theta must have shape ({N},5); got {tuple(theta.shape)}")
+            if theta.shape != (N, D):
+                raise ValueError(
+                    f"theta must have shape ({N},{D}); got {tuple(theta.shape)}"
+                )
             theta_fixed = theta
+
         else:
-            raise ValueError(f"theta must have shape (5,) or (N,5); got {tuple(theta.shape)}")
+            raise ValueError(
+                f"theta must have shape ({D},) or ({N},{D}); got {tuple(theta.shape)}"
+            )
 
     allowed_timeouts = math.ceil(TIMEOUT_FRAC_ALLOWED * T)
     
     for i in range(N):
         # Sample theta or use fixed
         if theta_fixed is None:
-            theta_i = prior_theta.sample((1,)).view(5).to(device=device, dtype=torch.float32)
+            theta_i = torch.as_tensor(
+                prior_theta.sample((1,)),
+                device=device,
+                dtype=torch.float32,
+            ).reshape(-1)
+
+            if theta_i.numel() != D:
+                raise RuntimeError(
+                    f"Prior returned theta with dim {theta_i.numel()}, expected {D}."
+                )
         else:
-            theta_i = theta_fixed[i].to(device=device, dtype=torch.float32)
+            theta_i = theta_fixed[i]
 
         theta_all[i] = theta_i
 
@@ -83,9 +120,9 @@ def simulate_training_sessions(
         )
 
         # Initial simulation of all T trial
-        theta_rep = theta_i.view(1, 5).expand(T, 5)   # (T, 5)
+        theta_rep = theta_i.view(1, D).expand(T, D)
 
-        x_raw, hit, _ = simulate_rt_choice_batch(
+        x_raw, hit, _ = simulate_batch_fn(
             theta_rep,
             mu_sensory=float(mu_sensory),
             pulse_sides=pulses,
@@ -106,7 +143,7 @@ def simulate_training_sessions(
             M = int(idx.numel())
 
             # Same theta_i, repeated only for the timed-out subset
-            theta_sub = theta_i.view(1, 5).expand(M, 5)   # (M, 5)
+            theta_sub = theta_i.view(1, D).expand(M, D)  # (M, D)
 
             # Fresh pulse draws for only the timed-out trials
             pulses_sub = generate_pulses_torch(
@@ -119,7 +156,7 @@ def simulate_training_sessions(
             )
 
             # Simulate only the subset that timed out
-            x_new, hit_new, _ = simulate_rt_choice_batch(
+            x_new, hit_new, _ = simulate_batch_fn(
                 theta_sub,
                 mu_sensory=float(mu_sensory),
                 pulse_sides=pulses_sub,

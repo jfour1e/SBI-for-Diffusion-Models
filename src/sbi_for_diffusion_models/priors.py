@@ -87,3 +87,24 @@ def build_prior_theta() -> Distribution:
             LogisticNormal(torch.tensor([0.0]), torch.tensor([1.5])),   # tau ∈ (0,1)
         ]
     )
+
+# for new lapse model 
+def build_prior_theta_lapse() -> Distribution:
+    """
+    Prior over theta = [a0, lam, v, B, tau].
+
+    All priors are Normal in unconstrained space, pushed through Sigmoid (for
+    [0,1]-bounded params) or Exp (for positive params).  This gives the MCMC
+    sampler Gaussian geometry in the unconstrained space.
+    """
+    return MultipleIndependent(
+        [
+            LogisticNormal(torch.tensor([0.0]), torch.tensor([0.5])),   # a0  ∈ (0,1)
+            ExpNormal(torch.tensor([-1.0]), torch.tensor([0.5])),       # lam ∈ (0,∞)
+            ExpNormal(torch.tensor([0.0]), torch.tensor([0.5])),        # v   ∈ (0,∞)
+            ExpNormal(torch.tensor([1.5]), torch.tensor([0.5])),       # B   ∈ (0,∞)
+            LogisticNormal(torch.tensor([0.0]), torch.tensor([1.5])),   # tau ∈ (0,1)
+            LogisticNormal(torch.tensor([-3.0]), torch.tensor([0.7])), # lapse ∈ (0,1)
+        ]
+    )
+

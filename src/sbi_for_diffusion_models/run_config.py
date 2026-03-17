@@ -30,8 +30,8 @@ class RunConfig:
     NPE_HIDDEN_FEATURES: int = 128
     NPE_NUM_TRANSFORMS: int = 5
     NPE_NUM_BINS: int = 8
-    NPE_SESSIONS_PER_STEP: int = 512
-    NPE_NUM_STEPS: int = 500
+    NPE_SESSIONS_PER_STEP: int = 64
+    NPE_NUM_STEPS: int = 150
     NPE_LR: float = 5e-4
 
     # Embedding network (DeepSets)

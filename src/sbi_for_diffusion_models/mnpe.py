@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, Callable 
 
 import numpy as np
 import torch
@@ -11,8 +11,8 @@ from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
 from sbi.inference.posteriors import DirectPosterior
 
-from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses, pack_x_rt_choice
-from sbi_for_diffusion_models.data_simulator import flatten_observed_session, simulate_training_sessions
+from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
+from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
 from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
 
 # ---------------------------------------------------------------------
@@ -24,18 +24,20 @@ def simulate_npe_training_data(
     cfg,
     prior_theta,
     *,
+    simulate_batch_fn: Callable,
     device: torch.device,
     seed: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Simulate session-level training pairs (theta, x) for NPE.
-    Returns theta_train of shape (N, 5) and flattened x_train of shape (N, T*(2+P)).
+    Returns theta_train of shape (N, D) and flattened x_train of shape (N, T*(2+P)).
     """
     P = max_num_pulses()
     theta_train, x_train = simulate_training_sessions(
         prior_theta,
         num_sessions=int(cfg.NPE_NUM_SESSIONS),
         num_trials=int(cfg.NUM_TRIALS_OBS),
+        simulate_batch_fn=simulate_batch_fn, 
         device=device,
         mu_sensory=float(cfg.MU_SENSORY),
         p_success=float(cfg.P_SUCCESS),
@@ -73,12 +75,13 @@ def _build_npe_estimator_builder(cfg, embedding_net):
         embedding_net=embedding_net,
     )
 
-def _simulate_dummy_batch(cfg, prior_theta, *, dev: torch.device, seed: int, T: int, P: int):
+def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev: torch.device, seed: int, T: int, P: int):
     """Simulate a small batch used to initialize estimator input shapes."""
     return simulate_training_sessions(
         prior_theta,
         num_sessions=2,
         num_trials=T,
+        simulate_batch_fn=simulate_batch_fn,
         device=dev,
         mu_sensory=float(cfg.MU_SENSORY),
         p_success=float(cfg.P_SUCCESS),
@@ -95,6 +98,7 @@ def train_npe_session(
     cfg,
     prior_theta,
     *,
+    simulate_batch_fn: Callable,
     device: str = "cpu",
     seed: int = 0,
 ):
@@ -117,6 +121,7 @@ def train_npe_session(
     theta_dummy, x_dummy = _simulate_dummy_batch(
         cfg,
         prior_theta,
+        simulate_batch_fn=simulate_batch_fn,
         dev=dev,
         seed=int(seed),
         T=T,
@@ -148,6 +153,7 @@ def train_npe_session(
             prior_theta,
             num_sessions=sess_per_step,
             num_trials=T,
+            simulate_batch_fn=simulate_batch_fn,
             device=dev,
             mu_sensory=float(cfg.MU_SENSORY),
             p_success=float(cfg.P_SUCCESS),
@@ -178,7 +184,8 @@ def train_npe_session(
                 if bad >= patience:
                     print(f"[NPE] early stop at step {step + 1}")
                     break
-
+    
+    density_estimator.eval()
     posterior = DirectPosterior(density_estimator, prior_theta)
     return density_estimator, posterior
 
@@ -217,14 +224,14 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
 
 def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
     """Compute SBC ranks for each parameter dimension."""
-    theta_true = theta_true.view(-1)
+    theta_true = theta_true.reshape(-1)
     return (posterior_samples < theta_true[None, :]).sum(dim=0).to(torch.int64)
 
 
 def _plot_sbc_rank_histograms(
     ranks: np.ndarray,
     *,
-    param_names: Sequence[str],
+    param_names: Optional[Sequence[str]] = None, 
     outpath: Optional[str] = None,
     bins: int = 30,
 ):
@@ -254,11 +261,12 @@ def run_sbc_npe(
     *,
     prior_theta,
     posterior,
+    simulate_batch_fn: Callable,
     device: str = "cpu",
     num_datasets: int = 100,
     posterior_samples_per_dataset: Optional[int] = None,
     seed: int = 0,
-    param_names: Sequence[str] = ("a0", "lam", "v", "B", "tau"),
+    param_names: Optional[Sequence[str]] = None, 
     outdir: str = "sbc_npe_outputs",
     plot_bins: int = 30,
 ) -> dict:
@@ -282,13 +290,33 @@ def run_sbc_npe(
     T = int(cfg.NUM_TRIALS_OBS)
     trial_dim = 2 + P
 
+    # infer theta dimension from prior
+    theta_probe = torch.as_tensor(
+        prior_theta.sample((1,)),
+        device=dev,
+        dtype=torch.float32,
+    ).reshape(-1)
+    D = int(theta_probe.numel())
+
+    if param_names is None:
+        param_names = tuple(f"theta_{d}" for d in range(D))
+    else:
+        param_names = tuple(param_names)
+        if len(param_names) != D:
+            raise ValueError(f"len(param_names)={len(param_names)} but theta_dim={D}")
+
     for i in range(int(num_datasets)):
-        theta_true = prior_theta.sample((1,)).view(5).to(device=dev, dtype=torch.float32)
+        theta_true = torch.as_tensor(
+            prior_theta.sample((1,)),
+            device=dev,
+            dtype=torch.float32,
+        ).reshape(-1)
 
         _, x_o = simulate_training_sessions(
             prior_theta,
             num_sessions=1,
             num_trials=T,
+            simulate_batch_fn=simulate_batch_fn,
             device=dev,
             mu_sensory=float(cfg.MU_SENSORY),
             p_success=float(cfg.P_SUCCESS),
@@ -302,7 +330,7 @@ def run_sbc_npe(
             raise RuntimeError(f"Unexpected x_o shape: {tuple(x_o.shape)}")
 
         samples = posterior.sample((S,), x=x_o, show_progress_bars=False).detach().cpu()
-        r = _compute_ranks(theta_true.detach().cpu().view(5), samples)
+        r = _compute_ranks(theta_true.detach().cpu(), samples)
 
         thetas_true.append(theta_true.detach().cpu().numpy())
         ranks.append(r.numpy())
