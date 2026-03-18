@@ -27,11 +27,11 @@ class RunConfig:
     # NPE settings
     NPE_NUM_SESSIONS: int = 20
     NPE_TRAIN_BATCH_SIZE: int = 512
-    NPE_HIDDEN_FEATURES: int = 128
+    NPE_HIDDEN_FEATURES: int = 192
     NPE_NUM_TRANSFORMS: int = 5
     NPE_NUM_BINS: int = 8
-    NPE_SESSIONS_PER_STEP: int = 64
-    NPE_NUM_STEPS: int = 150
+    NPE_SESSIONS_PER_STEP: int = 256
+    NPE_NUM_STEPS: int = 300
     NPE_LR: float = 5e-4
 
     # Embedding network (DeepSets)

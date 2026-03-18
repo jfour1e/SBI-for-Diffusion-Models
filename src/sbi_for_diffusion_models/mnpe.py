@@ -219,6 +219,67 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
     return samples
 
 # ---------------------------------------------------------------------
+# Load pretrained
+# ---------------------------------------------------------------------
+def load_npe(
+    model_path: str,
+    *,
+    prior_theta,
+    device: str = "cpu",
+):
+    """Rebuild the exact NPE architecture and load saved weights."""
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    saved_cfg = checkpoint["config"]
+
+    dev = torch.device(device)
+
+    P = max_num_pulses()
+    T = int(saved_cfg.NUM_TRIALS_OBS)
+    trial_dim = 2 + P
+    x_dim = T * trial_dim
+
+    theta_probe = torch.as_tensor(
+        prior_theta.sample((1,)),
+        device=dev,
+        dtype=torch.float32,
+    ).reshape(-1)
+    theta_dim = int(theta_probe.numel())
+
+    embedding_net = PermutationInvariantEmbedding(
+        num_trials=T,
+        trial_dim=trial_dim,
+        trial_net_hidden=int(saved_cfg.NPE_TRIAL_NET_HIDDEN),
+        trial_net_layers=int(saved_cfg.NPE_TRIAL_NET_LAYERS),
+        trial_net_output_dim=int(saved_cfg.NPE_TRIAL_NET_OUTPUT_DIM),
+        post_agg_hidden=int(saved_cfg.NPE_POST_AGG_HIDDEN),
+        post_agg_layers=int(saved_cfg.NPE_POST_AGG_LAYERS),
+        output_dim=int(saved_cfg.NPE_EMBEDDING_OUTPUT_DIM),
+        aggregation=str(saved_cfg.NPE_AGG_FN),
+    )
+
+    est_builder = posterior_nn(
+        model="nsf",
+        z_score_theta="independent",
+        z_score_x="none",
+        hidden_features=int(saved_cfg.NPE_HIDDEN_FEATURES),
+        num_transforms=int(saved_cfg.NPE_NUM_TRANSFORMS),
+        num_bins=int(saved_cfg.NPE_NUM_BINS),
+        embedding_net=embedding_net,
+    )
+
+    # SBI builder requires dummy inputs to instantiate the nn.Module.
+    dummy_theta = torch.randn(2, theta_dim, device=dev)
+    dummy_x = torch.randn(2, x_dim, device=dev)
+    density_estimator = est_builder(dummy_theta, dummy_x)
+
+    density_estimator.load_state_dict(checkpoint["state_dict"], strict=True)
+    density_estimator.to(dev)
+    density_estimator.eval()
+
+    return density_estimator, saved_cfg
+
+
+# ---------------------------------------------------------------------
 # SBC utilities
 # ---------------------------------------------------------------------
 
