@@ -44,11 +44,6 @@ DATA_PATH = "/projectnb/ssmsvi/rsenne/data_marmoset/marmoset_data.csv.gz"
 
 PARAM_NAMES = ["a0", "lam", "v", "B", "tau", "p_lapse"]
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 @torch.no_grad()
 def simulate_from_posterior(posterior_samples: np.ndarray, n_ppc: int, T: int, P: int,
                              device: str = "cpu") -> dict:
@@ -130,10 +125,6 @@ def _extract_real(x_flat: torch.Tensor, T: int, P: int) -> dict:
     return {"rt": rt, "choice": choice, "hit": hit}
 
 
-# ---------------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------------
-
 def plot_ppc_session(real: dict, sim: dict, session_label: str,
                      acc_real: float, outpath: str):
     """4-panel PPC plot for one session."""
@@ -144,7 +135,6 @@ def plot_ppc_session(real: dict, sim: dict, session_label: str,
     rt_max = float(T_MAX)
     bins = np.linspace(0, rt_max, 41)
 
-    # ---- panel 1: RT histogram ----
     ax = axes[0]
     real_rt_hit = real["rt"][real["hit"]]
     sim_rt_hit  = sim["rt"].reshape(-1)[sim["hit"].reshape(-1)]  # pool all draws
@@ -158,7 +148,6 @@ def plot_ppc_session(real: dict, sim: dict, session_label: str,
     ax.set_title("RT distribution (non-timeout)")
     ax.legend(fontsize=8)
 
-    # ---- panel 2: cumulative RT ----
     ax = axes[1]
     for rt_arr, col, lbl in [(real_rt_hit, "steelblue", "Real"),
                               (sim_rt_hit,  "tomato",    "PPC")]:
@@ -169,7 +158,6 @@ def plot_ppc_session(real: dict, sim: dict, session_label: str,
     ax.set_title("Cumulative RT")
     ax.legend(fontsize=8)
 
-    # ---- panel 3: accuracy distribution across PPC draws ----
     ax = axes[2]
     # acc_real comes from session metadata (choice == correct_side), not from mean(choice)
     # which would give ~0.5 under absolute right/left encoding.
@@ -178,8 +166,7 @@ def plot_ppc_session(real: dict, sim: dict, session_label: str,
     ax.set_xlabel("Accuracy")
     ax.set_title("Accuracy distribution")
     ax.legend(fontsize=8)
-
-    # ---- panel 4: timeout rate ----
+    
     ax = axes[3]
     real_timeout = 1.0 - real["hit"].mean()
     ax.hist(sim["timeout_per_draw"], bins=20, color="tomato", alpha=0.7, label="PPC draws")
@@ -194,13 +181,8 @@ def plot_ppc_session(real: dict, sim: dict, session_label: str,
     plt.close(fig)
     print(f"  Saved: {outpath}")
 
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
 def main():
-    device = "cpu"   # PPC runs fine on CPU
+    device = "cpu" 
     os.makedirs(OUTDIR, exist_ok=True)
 
     P = max_num_pulses()

@@ -15,10 +15,6 @@ from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
 from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
 from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
 
-# ---------------------------------------------------------------------
-# Training-data simulation
-# ---------------------------------------------------------------------
-
 @torch.no_grad()
 def simulate_npe_training_data(
     cfg,
@@ -66,7 +62,7 @@ def _build_npe_embedding_net(cfg, *, T: int, P: int) -> torch.nn.Module:
 def _build_npe_estimator_builder(cfg, embedding_net):
     """Build the SBI posterior density-estimator factory."""
     return posterior_nn(
-        model="nsf",
+        model="zuko_nsf",
         z_score_theta="independent",
         z_score_x="none",
         hidden_features=int(cfg.NPE_HIDDEN_FEATURES),
@@ -89,10 +85,6 @@ def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev:
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=int(seed),
     )
-
-# ---------------------------------------------------------------------
-# NPE training
-# ---------------------------------------------------------------------
 
 def train_npe_session(
     cfg,
@@ -197,11 +189,6 @@ def train_npe_session(
     posterior = DirectPosterior(density_estimator, prior_theta)
     return density_estimator, posterior
 
-
-# ---------------------------------------------------------------------
-# Posterior inference
-# ---------------------------------------------------------------------
-
 def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta):
     """
     Draw posterior samples from the amortized NPE model for one observed session.
@@ -226,9 +213,6 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
     )
     return samples
 
-# ---------------------------------------------------------------------
-# Load pretrained
-# ---------------------------------------------------------------------
 def load_npe(
     model_path: str,
     *,
@@ -266,7 +250,7 @@ def load_npe(
     )
 
     est_builder = posterior_nn(
-        model="nsf",
+        model="zuko_nsf",
         z_score_theta="independent",
         z_score_x="none",
         hidden_features=int(saved_cfg.NPE_HIDDEN_FEATURES),
@@ -285,11 +269,6 @@ def load_npe(
     density_estimator.eval()
 
     return density_estimator, saved_cfg
-
-
-# ---------------------------------------------------------------------
-# SBC utilities
-# ---------------------------------------------------------------------
 
 def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
     """Compute SBC ranks for each parameter dimension."""
@@ -322,7 +301,6 @@ def _plot_sbc_rank_histograms(
         print("Saved SBC plot:", outpath)
 
     return fig
-
 
 @torch.no_grad()
 def run_sbc_npe(

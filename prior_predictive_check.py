@@ -43,15 +43,10 @@ from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, T_MAX
 
 cfg = RUN_CONFIG_PARAMS
 
-# ---------------------------------------------------------------------------
-# Config (override via env vars)
-# ---------------------------------------------------------------------------
 MODEL_NAME = os.environ.get("MODEL_NAME", "lapse")      # "base" | "lapse"
 N_SESSIONS = int(os.environ.get("N_SESSIONS", "100"))   # prior draws
 SEED       = int(os.environ.get("SEED", "42"))
 OUTDIR     = os.environ.get("OUTDIR", "prior_predictive_outputs")
-# ---------------------------------------------------------------------------
-
 
 def get_model_spec(model_name: str) -> dict:
     if model_name == "base":
@@ -128,7 +123,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
     N, T    = rt_real.shape
     D       = theta.shape[1]
 
-    # ---- 1. Prior marginals ------------------------------------------------
     ncols = min(D, 4)
     nrows = math.ceil(D / ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows))
@@ -147,7 +141,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- 2. Marginal RT distribution (non-timeout trials only) -------------
     rt_flat = rt_real[hit]
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     axes[0].hist(rt_flat, bins=80, density=True, color="coral", alpha=0.8)
@@ -169,7 +162,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- 3. Per-session choice accuracy ------------------------------------
     acc_per_session = np.array([
         correct[i][hit[i]].mean() if hit[i].sum() > 0 else np.nan
         for i in range(N)
@@ -191,7 +183,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- 4. Per-session timeout rate ---------------------------------------
     timeout_rate = (~hit).mean(axis=1)
 
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -208,7 +199,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- 5. Median RT per session (spread sanity check) --------------------
     med_rt = np.array([
         np.median(rt_real[i][hit[i]]) if hit[i].sum() > 0 else np.nan
         for i in range(N)
@@ -226,7 +216,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- 6. Summary text ---------------------------------------------------
     summary_path = os.path.join(outdir, "summary.txt")
     with open(summary_path, "w") as f:
         f.write("Prior Predictive Check Summary\n")
@@ -302,7 +291,6 @@ def main() -> None:
     print(f"\nPlotting to {OUTDIR}/ ...")
     plot_prior_predictive(data, param_names, OUTDIR)
     print("\nDone.")
-
 
 if __name__ == "__main__":
     main()

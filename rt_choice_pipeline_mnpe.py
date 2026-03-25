@@ -31,9 +31,6 @@ def main():
     trial_dim = 2 + P
     print(f"P={P}, T={T}, trial_dim={trial_dim}")
 
-    # --------------------------------------------------
-    # Choose model family here
-    # --------------------------------------------------
     model_name = "lapse"  
 
     if model_name == "base":

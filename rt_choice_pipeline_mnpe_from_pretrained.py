@@ -25,9 +25,6 @@ from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 
 cfg = RUN_CONFIG_PARAMS
 
-# ---------------------------------------------------------------------
-# User choice: must be "base" or "lapse"
-# ---------------------------------------------------------------------
 MODEL_NAME = "lapse"
 
 def get_model_spec(model_name: str):

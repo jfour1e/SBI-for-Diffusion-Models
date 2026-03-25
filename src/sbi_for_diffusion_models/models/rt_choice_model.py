@@ -8,7 +8,6 @@ from torch import Tensor
 from ..run_config import RUN_CONFIG_PARAMS, T_MAX, PULSE_INTERVAL
 cfg = RUN_CONFIG_PARAMS
 
-# ---------------- Helper functions ----------------
 def max_num_pulses() -> int:
     """Maximum number of pulses in a trial of duration T_MAX."""
     return int(float(T_MAX) / float(PULSE_INTERVAL))
@@ -83,8 +82,6 @@ def pack_x_rt_choice(rt_choice: Tensor, *, log_rt: bool) -> Tensor:
     choice = rt_choice[:, 1:2].to(torch.int64)
     return torch.cat([rt, choice.to(torch.float32)], dim=1)
 
-
-# ---------------- OU transition and coarse loop ----------------
 def _ou_transition_params(
     lam: Tensor, dt: float, sigma: float,
 ) -> Tuple[Tensor, Tensor]:
@@ -229,7 +226,6 @@ def _run_fine_ou_loop(
         if not torch.any(active):
             break
 
-        # --- pulse kick at t = k*delta  (first pulse at t=delta, not t=0) ---
         if step > 0 and step % steps_per_pulse == 0:
             k = step // steps_per_pulse - 1  # pulse 0 at step=steps_per_pulse
             if k < P_max:
@@ -251,7 +247,6 @@ def _run_fine_ou_loop(
         if not torch.any(active):
             continue
 
-        # --- OU evolution for dt (restores toward B/2, not 0) ---
         eps = torch.randn((N,), device=device, dtype=dtype)
         a = torch.where(active, a * decay + (B / 2.0) * (1.0 - decay) + noise_std * eps, a)
 
@@ -267,8 +262,6 @@ def _run_fine_ou_loop(
 
     return hit, choice, decision_time
 
-
-# -------------- MNPE Simulator --------------
 def simulate_rt_choice_batch(
     theta: Tensor,
     *,

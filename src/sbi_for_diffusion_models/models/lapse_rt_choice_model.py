@@ -10,10 +10,6 @@ cfg = RUN_CONFIG_PARAMS
 
 from .rt_choice_model import max_num_pulses, as_pulse_tensor, generate_pulses_torch, _ou_transition_params
 
-# ---------------------------------------------------------------------
-# Core non-lapse accumulator simulator
-# ---------------------------------------------------------------------
-
 def _run_fine_ou_loop_lapse(
     a0_frac: Tensor,
     lam: Tensor,
@@ -95,10 +91,6 @@ def _run_fine_ou_loop_lapse(
             decision_time[newly_hit] = (step + 1) * dt
 
     return hit, choice, decision_time
-
-# ---------------------------------------------------------------------
-# Lapse Sampler
-# ---------------------------------------------------------------------
 
 def _sample_lapse_observations(
     n_trials: int,

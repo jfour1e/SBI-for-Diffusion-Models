@@ -196,7 +196,6 @@ def main() -> None:
             print(f"  [{i+1}/{N_TEST}]  mean contraction: "
                   f"{contraction.mean():.3f}")
 
-    # ---- Plot 1: Contraction boxplot ----------------------------------------
     fig, ax = plt.subplots(figsize=(max(6, D * 1.2), 4))
     ax.boxplot(all_contractions, labels=param_names, patch_artist=True)
     ax.axhline(0.0, color="k",   linestyle="--", linewidth=1, label="no update")
@@ -210,7 +209,6 @@ def main() -> None:
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- Plot 2: Prior vs posterior marginals (first test session) ----------
     post0 = all_post_samples[0]   # (N_POST, D)
     ncols = min(D, 4)
     nrows = int(np.ceil(D / ncols))
@@ -233,7 +231,6 @@ def main() -> None:
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- Plot 3: Pairplot of first session -----------------------------------
     theta_true_pt = torch.from_numpy(all_theta_true[0:1])
     fig, _ = pairplot(
         torch.from_numpy(post0),
@@ -247,7 +244,6 @@ def main() -> None:
     plt.close(fig)
     print("Saved:", path)
 
-    # ---- Summary stats -------------------------------------------------------
     summary_path = os.path.join(OUTDIR, "summary.txt")
     with open(summary_path, "w") as f:
         f.write(f"Posterior Update Check Summary\n")

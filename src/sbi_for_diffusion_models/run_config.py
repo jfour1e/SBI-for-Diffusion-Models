@@ -28,7 +28,7 @@ class RunConfig:
     NPE_NUM_SESSIONS: int = 20
     NPE_TRAIN_BATCH_SIZE: int = 512
     NPE_HIDDEN_FEATURES: int = 256   # flow hidden dim (was 192)
-    NPE_NUM_TRANSFORMS: int = 8      # NSF coupling layers (was 5)
+    NPE_NUM_TRANSFORMS: int = 10      # NSF coupling layers (was 5)
     NPE_NUM_BINS: int = 12           # spline bins per transform (was 8)
     NPE_SESSIONS_PER_STEP: int = 256
     NPE_NUM_STEPS: int = 2000        # training steps (was 300)
