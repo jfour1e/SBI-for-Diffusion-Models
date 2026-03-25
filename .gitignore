@@ -8,3 +8,18 @@ sbi-logs/NPE_C
 /npe_outputs
 /sbc_outputs
 marmoset_data.csv.gz
+CLAUDE.md
+prior_predictive_outputs/
+
+# output files
+/sbc_outputs
+/logs
+/marmoset_outputs
+/models
+/npe_outputs_lapse
+/prior_predictive_outputs_v3
+/sbc_outputs_lapse
+/posterior_update_outputs
+
+# job scripts
+*.sh

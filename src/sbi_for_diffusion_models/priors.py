@@ -81,17 +81,17 @@ def build_prior_theta() -> Distribution:
     return MultipleIndependent(
         [
             LogisticNormal(torch.tensor([0.0]), torch.tensor([0.5])),   # a0  ∈ (0,1)
-            ExpNormal(torch.tensor([-1.0]), torch.tensor([0.5])),       # lam ∈ (0,∞)
+            ExpNormal(torch.tensor([-1.5]), torch.tensor([0.35])),      # lam ∈ (0,∞)  loc -1.0→-1.5, scale 0.5→0.35: mean ~0.24, avoids high-lam timeouts with OU→B/2
             ExpNormal(torch.tensor([0.0]), torch.tensor([0.5])),        # v   ∈ (0,∞)
-            ExpNormal(torch.tensor([1.5]), torch.tensor([0.5])),       # B   ∈ (0,∞)
+            ExpNormal(torch.tensor([1.0]), torch.tensor([0.35])),       # B   ∈ (0,∞)  scale 0.5→0.35: tighter tail, mean ~2.9, avoids high-B timeouts with OU→B/2
             LogisticNormal(torch.tensor([0.0]), torch.tensor([1.5])),   # tau ∈ (0,1)
         ]
     )
 
-# for new lapse model 
+# for new lapse model
 def build_prior_theta_lapse() -> Distribution:
     """
-    Prior over theta = [a0, lam, v, B, tau].
+    Prior over theta = [a0, lam, v, B, tau, p_lapse].
 
     All priors are Normal in unconstrained space, pushed through Sigmoid (for
     [0,1]-bounded params) or Exp (for positive params).  This gives the MCMC
@@ -100,9 +100,9 @@ def build_prior_theta_lapse() -> Distribution:
     return MultipleIndependent(
         [
             LogisticNormal(torch.tensor([0.0]), torch.tensor([0.5])),   # a0  ∈ (0,1)
-            ExpNormal(torch.tensor([-1.0]), torch.tensor([0.5])),       # lam ∈ (0,∞)
+            ExpNormal(torch.tensor([-1.5]), torch.tensor([0.35])),      # lam ∈ (0,∞)  loc -1.0→-1.5, scale 0.5→0.35: mean ~0.24, avoids high-lam timeouts with OU→B/2
             ExpNormal(torch.tensor([0.0]), torch.tensor([0.5])),        # v   ∈ (0,∞)
-            ExpNormal(torch.tensor([1.5]), torch.tensor([0.5])),       # B   ∈ (0,∞)
+            ExpNormal(torch.tensor([1.0]), torch.tensor([0.35])),       # B   ∈ (0,∞)  scale 0.5→0.35: tighter tail, mean ~2.9, avoids high-B timeouts with OU→B/2
             LogisticNormal(torch.tensor([0.0]), torch.tensor([1.5])),   # tau ∈ (0,1)
             LogisticNormal(torch.tensor([-3.0]), torch.tensor([0.7])), # lapse ∈ (0,1)
         ]

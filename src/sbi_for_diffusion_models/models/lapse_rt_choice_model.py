@@ -8,7 +8,7 @@ from torch import Tensor
 from ..run_config import RUN_CONFIG_PARAMS, T_MAX, PULSE_INTERVAL
 cfg = RUN_CONFIG_PARAMS
 
-from rt_choice_model import max_num_pulses, as_pulse_tensor, generate_pulses_torch, _ou_transition_params
+from .rt_choice_model import max_num_pulses, as_pulse_tensor, generate_pulses_torch, _ou_transition_params
 
 # ---------------------------------------------------------------------
 # Core non-lapse accumulator simulator
@@ -61,9 +61,10 @@ def _run_fine_ou_loop_lapse(
         if not torch.any(active):
             break
 
-        # pulse kick at pulse boundaries
-        if step % steps_per_pulse == 0:
-            k = step // steps_per_pulse
+        # pulse kick at pulse boundaries — pulse k fires at t=(k+1)*delta,
+        # matching base model convention and mask_unperceived_pulses.
+        if step > 0 and step % steps_per_pulse == 0:
+            k = step // steps_per_pulse - 1
             if k < P_max:
                 a = torch.where(active, a + v * s[:, k], a)
 
@@ -80,9 +81,9 @@ def _run_fine_ou_loop_lapse(
         if not torch.any(active):
             continue
 
-        # OU evolution for one internal step
+        # OU evolution for one internal step (restores toward B/2, not 0)
         eps = torch.randn((N,), device=device, dtype=dtype)
-        a = torch.where(active, a * decay + noise_std * eps, a)
+        a = torch.where(active, a * decay + (B / 2.0) * (1.0 - decay) + noise_std * eps, a)
 
         hit_upper = active & (a >= B)
         hit_lower = active & (a <= 0.0)

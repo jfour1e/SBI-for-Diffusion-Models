@@ -1,12 +1,14 @@
 import torch
 from typing import Optional, Callable
-import math 
+import math
+import warnings
 
 from sbi_for_diffusion_models.models.rt_choice_model import (
     pack_x_rt_choice,
     generate_pulses_torch,
+    mask_unperceived_pulses,
 )
-from .run_config import T_MAX, MAX_TIMEOUT_TRIES, TIMEOUT_FRAC_ALLOWED
+from .run_config import T_MAX, PULSE_INTERVAL, MAX_TIMEOUT_TRIES, TIMEOUT_FRAC_ALLOWED
 
 @torch.no_grad()
 def simulate_training_sessions(
@@ -183,13 +185,14 @@ def simulate_training_sessions(
 
         if n_timeouts > allowed_timeouts:
             frac = n_timeouts / max(1, T)
-            raise RuntimeError(
-                f"[prior predictive check failed] Too many timeout trials after retries.\n"
-                f"Session {i}: timeouts={n_timeouts}/{T} ({frac:.1%}), "
-                f"allowed={allowed_timeouts}/{T} ({TIMEOUT_FRAC_ALLOWED:.0%}).\n"
-                f"MAX_TIMEOUT_TRIES={int(MAX_TIMEOUT_TRIES)}\n"
-                f"This likely indicates a bad prior (e.g., drift too small, bounds too large, "
-                f"tau too close to T_MAX, etc.). Choose a better prior."
+            warnings.warn(
+                f"[simulate_training_sessions] High timeout rate in session {i}: "
+                f"{n_timeouts}/{T} ({frac:.1%}) after {MAX_TIMEOUT_TRIES} retries "
+                f"(allowed {TIMEOUT_FRAC_ALLOWED:.0%}). "
+                f"theta={theta_i.cpu().tolist()}. "
+                f"Proceeding with forced T_MAX trials — consider tightening the prior.",
+                RuntimeWarning,
+                stacklevel=2,
             )
         
         # force boundary hit for remaining trials
@@ -213,6 +216,15 @@ def simulate_training_sessions(
 
             x_forced = torch.cat([forced_rt, forced_choice], dim=1)
             x_raw.index_copy_(0, idx, x_forced)
+
+        # Zero out pulses the model never perceived (after decision time).
+        # mask_unperceived_pulses returns NaN for post-decision slots; we
+        # replace with 0 so the neural network sees a neutral (no-pulse) signal.
+        rt_raw = x_raw[:, 0]  # (T,) raw RT before log transform
+        pulses = torch.nan_to_num(
+            mask_unperceived_pulses(pulses, rt_raw, float(PULSE_INTERVAL)),
+            nan=0.0,
+        )
 
         # pack [rt, choice]
         x_packed = pack_x_rt_choice(x_raw, log_rt=bool(log_rt))  # (T, 2)

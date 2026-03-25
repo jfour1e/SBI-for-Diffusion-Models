@@ -68,7 +68,8 @@ def mask_unperceived_pulses(
     Set pulse entries to NaN for any pulse the animal could not have perceived.
     """
     N, P = pulse_sides.shape
-    pulse_times = torch.arange(P, device=pulse_sides.device, dtype=torch.float32) * pulse_interval
+    # Pulses arrive at t = (k+1)*pulse_interval (first pulse at pulse_interval, not 0)
+    pulse_times = (torch.arange(P, device=pulse_sides.device, dtype=torch.float32) + 1) * pulse_interval
     unperceived = pulse_times.unsqueeze(0) > rt.to(pulse_sides.device).unsqueeze(1)  # (N, P)
     out = pulse_sides.clone()
     out[unperceived] = float("nan")
@@ -228,9 +229,9 @@ def _run_fine_ou_loop(
         if not torch.any(active):
             break
 
-        # --- pulse kick at t = k*delta ---
-        if step % steps_per_pulse == 0:
-            k = step // steps_per_pulse
+        # --- pulse kick at t = k*delta  (first pulse at t=delta, not t=0) ---
+        if step > 0 and step % steps_per_pulse == 0:
+            k = step // steps_per_pulse - 1  # pulse 0 at step=steps_per_pulse
             if k < P_max:
                 # apply kick to active trials
                 a = torch.where(active, a + v * s[:, k], a)
@@ -250,9 +251,9 @@ def _run_fine_ou_loop(
         if not torch.any(active):
             continue
 
-        # --- OU evolution for dt ---
+        # --- OU evolution for dt (restores toward B/2, not 0) ---
         eps = torch.randn((N,), device=device, dtype=dtype)
-        a = torch.where(active, a * decay + noise_std * eps, a)
+        a = torch.where(active, a * decay + (B / 2.0) * (1.0 - decay) + noise_std * eps, a)
 
         # boundary check after OU step (at t=(step+1)*dt)
         hit_upper = active & (a >= B)

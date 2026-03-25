@@ -101,6 +101,8 @@ def train_npe_session(
     simulate_batch_fn: Callable,
     device: str = "cpu",
     seed: int = 0,
+    resume_from: Optional[str] = None,
+    seed_offset: int = 0,
 ):
     """
     Train an amortized NPE posterior on simulated RT-choice sessions.
@@ -131,6 +133,12 @@ def train_npe_session(
     x_dummy = x_dummy.to(dev, dtype=torch.float32)
 
     density_estimator = est_builder(theta_dummy, x_dummy).to(dev)
+
+    if resume_from is not None:
+        checkpoint = torch.load(resume_from, map_location=dev, weights_only=False)
+        density_estimator.load_state_dict(checkpoint["state_dict"], strict=True)
+        print(f"[NPE] Resumed weights from {resume_from}")
+
     density_estimator.train()
 
     lr = float(getattr(cfg, "NPE_LR", 5e-4))
@@ -159,7 +167,7 @@ def train_npe_session(
             p_success=float(cfg.P_SUCCESS),
             P=P,
             log_rt=bool(cfg.LOG_RT_MANUALLY),
-            seed=int(seed + step + 1),
+            seed=int(seed + step + seed_offset + 1),
         )
         theta_b = theta_b.to(dev, dtype=torch.float32)
         x_b = x_b.to(dev, dtype=torch.float32)
