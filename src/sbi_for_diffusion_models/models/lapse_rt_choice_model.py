@@ -58,7 +58,6 @@ def _run_fine_ou_loop_lapse(
             break
 
         # pulse kick at pulse boundaries — pulse k fires at t=(k+1)*delta,
-        # matching base model convention and mask_unperceived_pulses.
         if step > 0 and step % steps_per_pulse == 0:
             k = step // steps_per_pulse - 1
             if k < P_max:

@@ -7,8 +7,9 @@ dependencies = [
     "matplotlib>=3.8",
     "numpy>=1.26,<2",
     "pandas>=2.3.3",
+    "pytest>=9.0.2",
     "sbi>=0.25.0",
-    "torch==2.10.0"
+    "torch==2.10.0",
 ]
 
 [tool.uv]
