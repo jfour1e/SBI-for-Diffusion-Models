@@ -32,7 +32,6 @@ from .run_config import PULSE_INTERVAL, T_MAX
 # Maximum number of pulse bins consistent with current config
 P_MAX = int(float(T_MAX) / float(PULSE_INTERVAL))  # 40
 
-
 def _flash_string_to_pulses(
     flashes_left: str,
     flashes_right: str,
@@ -54,8 +53,7 @@ def _flash_string_to_pulses(
     -------
     pulses : np.ndarray, shape (p_max,), values in {-1, 0, +1}
     """
-    n_shown = len(flashes_left)  # string length = number of presented pulses
-    n_shown = min(n_shown, p_max)
+    n_shown = min(len(flashes_left), len(flashes_right), p_max)
 
     # Number of bins the animal could have experienced before responding
     n_perceived = min(math.floor(rt / pulse_interval), n_shown)
@@ -106,7 +104,8 @@ def load_marmoset_sessions(
     """
     rng = np.random.default_rng(seed)
 
-    df = pd.read_csv(csv_path)
+    # fixed fragile df load: force datatype str
+    df = pd.read_csv(csv_path, dtype={"flashes_left": str, "flashes_right": str})
     df = df[(df["name"] == animal) & (df["stage"] == stage)].copy()
 
     if len(df) == 0:
