@@ -18,7 +18,7 @@ class RunConfig:
 # Data / simulator settings
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.7
-    NUM_TRIALS_OBS : int = 256
+    NUM_TRIALS_OBS : int = 1024 # set to power of 2 closest to dataset size 
 
     # We recommend log-transforming RT but NOT the categorical choice.
     LOG_RT_MANUALLY: bool = True
@@ -35,6 +35,7 @@ class RunConfig:
     NPE_LR: float = 3e-4             # slightly lower LR for larger model (was 5e-4)
 
     # Embedding network (DeepSets)
+    NPE_EMBEDDING_INPUT_DIM = 1000 # embedding network input paramter 
     NPE_TRIAL_NET_HIDDEN: int = 256  # per-trial MLP width (was 128)
     NPE_TRIAL_NET_LAYERS: int = 4    # per-trial MLP depth (was 3)
     NPE_TRIAL_NET_OUTPUT_DIM: int = 128  # per-trial embedding dim (was 64)
