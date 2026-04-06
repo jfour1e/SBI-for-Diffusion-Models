@@ -86,6 +86,103 @@ def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev:
         seed=int(seed),
     )
 
+# session reservior class
+class SessionReservoir:
+    """
+    Pre-simulated pool of (theta, x) session pairs for fast mini-batch sampling.
+    """
+
+    def __init__(self, theta: torch.Tensor, x: torch.Tensor, device: torch.device):
+        self.theta = theta  # (R, D)
+        self.x = x          # (R, T * trial_dim)
+        self.device = device
+        self.size = theta.shape[0]
+
+    @classmethod
+    def build(
+        cls,
+        cfg,
+        prior_theta,
+        simulate_batch_fn: Callable,
+        device: torch.device,
+        seed: int = 0,
+    ) -> "SessionReservoir":
+        """
+        Simulate the full reservoir upfront.
+        """
+        R = int(getattr(cfg, "NPE_RESERVOIR_SIZE", cfg.NPE_NUM_SESSIONS))
+        P = max_num_pulses()
+        T = int(cfg.NUM_TRIALS_OBS)
+
+        print(f"[Reservoir] Simulating {R} sessions (T={T}, P={P}) ...")
+
+        theta_all, x_all = simulate_training_sessions(
+            prior_theta,
+            num_sessions=R,
+            num_trials=T,
+            simulate_batch_fn=simulate_batch_fn,
+            device=device,
+            mu_sensory=float(cfg.MU_SENSORY),
+            p_success=float(cfg.P_SUCCESS),
+            P=P,
+            log_rt=bool(cfg.LOG_RT_MANUALLY),
+            seed=int(seed),
+        )
+
+        theta_all = theta_all.to(device, dtype=torch.float32)
+        x_all = x_all.to(device, dtype=torch.float32)
+
+        return cls(theta_all, x_all, device)
+
+    def sample_batch(
+        self, batch_size: int, generator: Optional[torch.Generator] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Sample a mini-batch with replacement from the reservoir."""
+        idx = torch.randint(
+            0, self.size, (batch_size,),
+            device=self.device, generator=generator,
+        )
+        return self.theta[idx], self.x[idx]
+
+    @torch.no_grad()
+    def partial_refresh(
+        self,
+        cfg,
+        prior_theta,
+        simulate_batch_fn: Callable,
+        frac: float,
+        seed: int,
+    ) -> int:
+        """
+        Replace a random fraction of the reservoir with freshly simulated sessions.
+
+        Returns the number of sessions replaced.
+        """
+        n_replace = max(1, int(frac * self.size))
+        P = max_num_pulses()
+        T = int(cfg.NUM_TRIALS_OBS)
+
+        theta_new, x_new = simulate_training_sessions(
+            prior_theta,
+            num_sessions=n_replace,
+            num_trials=T,
+            simulate_batch_fn=simulate_batch_fn,
+            device=self.device,
+            mu_sensory=float(cfg.MU_SENSORY),
+            p_success=float(cfg.P_SUCCESS),
+            P=P,
+            log_rt=bool(cfg.LOG_RT_MANUALLY),
+            seed=seed,
+        )
+
+        # Pick random slots to overwrite
+        idx = torch.randperm(self.size, device=self.device)[:n_replace]
+        self.theta[idx] = theta_new.to(self.device, dtype=torch.float32)
+        self.x[idx] = x_new.to(self.device, dtype=torch.float32)
+
+        return n_replace
+
+# core training function 
 def train_npe_session(
     cfg,
     prior_theta,
@@ -131,6 +228,13 @@ def train_npe_session(
         density_estimator.load_state_dict(checkpoint["state_dict"], strict=True)
         print(f"[NPE] Resumed weights from {resume_from}")
 
+    # build reservoir 
+    reservoir = SessionReservoir.build(
+        cfg, prior_theta, simulate_batch_fn,
+        device=dev, seed=int(seed + seed_offset),
+    )
+
+    # training loop 
     density_estimator.train()
 
     lr = float(getattr(cfg, "NPE_LR", 5e-4))
@@ -138,6 +242,7 @@ def train_npe_session(
 
     sess_per_step = int(getattr(cfg, "NPE_SESSIONS_PER_STEP", 8))
     num_steps = int(getattr(cfg, "NPE_NUM_STEPS", 10_000))
+    refresh_frac = float(getattr(cfg, "NPE_RESERVOIR_REFRESH_FRAC", 0.0))
 
     print(f"[NPE] device={dev}, sess_per_step={sess_per_step}, num_steps={num_steps}, lr={lr}")
 
@@ -148,21 +253,12 @@ def train_npe_session(
     ema_beta = float(getattr(cfg, "NPE_EMA_BETA", 0.98))
     ema = None
 
+    train_gen = torch.Generator(device=dev)
+    train_gen.manual_seed(int(seed + 999))
+
     for step in range(num_steps):
-        theta_b, x_b = simulate_training_sessions(
-            prior_theta,
-            num_sessions=sess_per_step,
-            num_trials=T,
-            simulate_batch_fn=simulate_batch_fn,
-            device=dev,
-            mu_sensory=float(cfg.MU_SENSORY),
-            p_success=float(cfg.P_SUCCESS),
-            P=P,
-            log_rt=bool(cfg.LOG_RT_MANUALLY),
-            seed=int(seed + step + seed_offset + 1),
-        )
-        theta_b = theta_b.to(dev, dtype=torch.float32)
-        x_b = x_b.to(dev, dtype=torch.float32)
+
+        theta_b, x_b = reservoir.sample_batch(sess_per_step, generator=train_gen)
 
         optimizer.zero_grad(set_to_none=True)
         losses = density_estimator.loss(theta_b, condition=x_b)
@@ -184,7 +280,14 @@ def train_npe_session(
                 if bad >= patience:
                     print(f"[NPE] early stop at step {step + 1}")
                     break
-    
+        if refresh_frac > 0 and (step + 1):
+            n_replaced = reservoir.partial_refresh(
+                cfg, prior_theta, simulate_batch_fn,
+                frac=refresh_frac,
+                seed=int(seed + step + seed_offset + 10_000),
+            )
+            print(f"[NPE] Refreshed {n_replaced}/{reservoir.size} reservoir sessions")
+
     density_estimator.eval()
     posterior = DirectPosterior(density_estimator, prior_theta)
     return density_estimator, posterior

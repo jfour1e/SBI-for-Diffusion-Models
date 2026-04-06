@@ -37,7 +37,8 @@ class _TinyConfig:
     P_SUCCESS: float = 0.7
     NUM_TRIALS_OBS: int = 16        
     LOG_RT_MANUALLY: bool = True
-
+    NPE_RESERVOIR_SIZE: int = 500
+    NPE_RESERVOIR_REFRESH_FRAC: float = 0.0
     NPE_NUM_SESSIONS: int = 4
     NPE_TRAIN_BATCH_SIZE: int = 4
     NPE_HIDDEN_FEATURES: int = 32
