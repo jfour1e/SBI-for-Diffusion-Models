@@ -45,13 +45,14 @@ class PermutationInvariantEmbedding(nn.Module):
 
     def forward(self, x_flat: torch.Tensor) -> torch.Tensor:
         B = x_flat.shape[0]
+        T = x_flat.shape[1] // self.trial_dim  # infer from input; handles any trial count
 
         # (B, T*D) -> (B, T, D)
-        x_3d = x_flat.view(B, self.num_trials, self.trial_dim)
+        x_3d = x_flat.view(B, T, self.trial_dim)
 
         # Embed each trial: FCEmbedding expects (B*T, D)
-        emb = self.trial_net(x_3d.reshape(B * self.num_trials, self.trial_dim))
-        emb = emb.view(B, self.num_trials, -1)  # (B, T, E)
+        emb = self.trial_net(x_3d.reshape(B * T, self.trial_dim))
+        emb = emb.view(B, T, -1)  # (B, T, E)
 
         if self.aggregation == "mean":
             agg = emb.mean(dim=1)

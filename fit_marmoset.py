@@ -33,7 +33,7 @@ from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 
 cfg = RUN_CONFIG_PARAMS
 
-ANIMAL      = os.environ.get("ANIMAL",     "Helios")
+ANIMAL      = os.environ.get("ANIMAL",     "Tortellini")
 STAGE       = os.environ.get("STAGE",      "70-30")
 MODEL_NAME  = os.environ.get("MODEL_NAME", "lapse")
 N_POST      = int(os.environ.get("N_POST",   "5000"))
@@ -62,6 +62,12 @@ def get_spec(model_name: str) -> dict:
     raise ValueError(model_name)
 
 def load_npe(model_path: str, prior_theta, device: str):
+    """Load the NPE and decouple the embedding net so we can feed variable-length sessions.
+
+    Returns the density estimator (with Identity embedding), the original
+    embedding net (accepts any trial count), the saved config, and T used
+    during training.
+    """
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     saved_cfg  = checkpoint["config"]
     dev        = torch.device(device)
@@ -98,7 +104,16 @@ def load_npe(model_path: str, prior_theta, device: str):
     )
     de.load_state_dict(checkpoint["state_dict"], strict=True)
     de.to(dev).eval()
-    return de, saved_cfg, T
+
+    # Extract the trained embedding net and replace it with Identity so that
+    # DirectPosterior skips the shape check on the raw x.  We will pre-embed
+    # variable-length sessions ourselves before calling posterior.sample().
+    embedding_net = de.net._embedding_net          # trained PermutationInvariantEmbedding
+    emb_out_dim   = int(saved_cfg.NPE_EMBEDDING_OUTPUT_DIM)
+    de.net._embedding_net = torch.nn.Identity()
+    de._condition_shape   = torch.Size([emb_out_dim])
+
+    return de, embedding_net, saved_cfg, T
 
 def main() -> None:
     torch.manual_seed(SEED)
@@ -118,7 +133,7 @@ def main() -> None:
 
     model_path = os.path.join(MODEL_DIR, spec["model_file"])
     print(f"Loading NPE from {model_path} ...")
-    de, saved_cfg, T = load_npe(model_path, prior_theta, device)
+    de, embedding_net, saved_cfg, T = load_npe(model_path, prior_theta, device)
 
     posterior = DirectPosterior(
         posterior_estimator=de,
@@ -130,7 +145,6 @@ def main() -> None:
         csv_path=DATA_PATH,
         animal=ANIMAL,
         stage=STAGE,
-        num_trials_per_session=T,
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=SEED,
     )
@@ -142,6 +156,39 @@ def main() -> None:
     ).cpu().numpy()
 
     os.makedirs(OUTDIR, exist_ok=True)
+
+    # ── Combined posterior (all trials from all sessions) ──
+    P = max_num_pulses()
+    trial_dim = 2 + P
+    all_trials = torch.cat(
+        [x_flat.reshape(-1, trial_dim) for x_flat in sessions], dim=0
+    )  # (total_trials, trial_dim)
+    total_n = all_trials.shape[0]
+    x_combined = all_trials.reshape(1, -1).to(device, dtype=torch.float32)
+
+    print(f"\n[Combined]  {total_n} trials across {len(sessions)} sessions")
+    with torch.no_grad():
+        x_emb = embedding_net(x_combined)
+    combined_samples = posterior.sample(
+        (N_POST,), x=x_emb, show_progress_bars=True
+    ).detach().cpu().numpy()
+
+    np.save(os.path.join(OUTDIR, "posterior_combined.npy"), combined_samples)
+
+    fig, _ = pairplot(
+        torch.from_numpy(combined_samples),
+        labels=param_names,
+    )
+    fig.suptitle(
+        f"{ANIMAL} | {STAGE} | combined ({total_n} trials, {len(sessions)} sessions)",
+        fontsize=10,
+    )
+    fig_path = os.path.join(OUTDIR, "pairplot_combined.png")
+    fig.savefig(fig_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print("  Saved:", fig_path)
+
+    # ── Per-session posteriors ──
     all_samples = []
 
     for s_idx, (x_flat, m) in enumerate(zip(sessions, meta)):
@@ -150,16 +197,16 @@ def main() -> None:
               f"n={m['n_trials']}  acc={m['accuracy']:.3f}")
 
         x_flat = x_flat.to(device, dtype=torch.float32)
+        with torch.no_grad():
+            x_emb = embedding_net(x_flat)
         samples = posterior.sample(
-            (N_POST,), x=x_flat, show_progress_bars=True
+            (N_POST,), x=x_emb, show_progress_bars=True
         ).detach().cpu().numpy()
         all_samples.append(samples)
 
-        # Save raw samples
         npy_path = os.path.join(OUTDIR, f"posterior_sess{s_idx+1}_{sess_label}.npy")
         np.save(npy_path, samples)
 
-        # Pairplot
         fig, _ = pairplot(
             torch.from_numpy(samples),
             labels=param_names,
@@ -175,6 +222,7 @@ def main() -> None:
         plt.close(fig)
         print("  Saved:", fig_path)
 
+    # ── Overlay: prior vs combined vs per-session ──
     ncols = min(D, 4)
     nrows = int(np.ceil(D / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows))
@@ -183,9 +231,12 @@ def main() -> None:
     for d, (ax, name) in enumerate(zip(axes, param_names)):
         ax.hist(prior_samples[:, d], bins=60, density=True,
                 alpha=0.4, color="steelblue", label="prior")
+        ax.hist(combined_samples[:, d], bins=60, density=True,
+                alpha=0.6, color="black", label="combined",
+                histtype="step", linewidth=2)
         for s_idx, samp in enumerate(all_samples):
             ax.hist(samp[:, d], bins=60, density=True,
-                    alpha=0.5, label=f"sess {s_idx+1}", histtype="step", linewidth=1.5)
+                    alpha=0.5, label=f"sess {s_idx+1}", histtype="step", linewidth=1)
         ax.set_title(name)
         ax.legend(fontsize=7)
 
@@ -193,8 +244,8 @@ def main() -> None:
         ax.set_visible(False)
 
     fig.suptitle(
-        f"{ANIMAL} {STAGE} — Prior vs Per-Session Posteriors\n"
-        f"({len(sessions)} sessions)",
+        f"{ANIMAL} {STAGE} — Prior vs Combined vs Per-Session Posteriors\n"
+        f"({len(sessions)} sessions, {total_n} total trials)",
         fontsize=12,
     )
     fig.tight_layout()
@@ -208,7 +259,14 @@ def main() -> None:
         f.write(f"Marmoset Posterior Fit Summary\n")
         f.write(f"==============================\n")
         f.write(f"Animal: {ANIMAL}  Stage: {STAGE}  Model: {MODEL_NAME}\n")
-        f.write(f"N sessions: {len(sessions)}\n\n")
+        f.write(f"N sessions: {len(sessions)}  Total trials: {total_n}\n\n")
+        f.write(f"Combined ({total_n} trials across all sessions)\n")
+        for d, name in enumerate(param_names):
+            f.write(f"  {name:10s}: mean={combined_samples[:,d].mean():.4f}  "
+                    f"std={combined_samples[:,d].std():.4f}  "
+                    f"[{np.percentile(combined_samples[:,d],5):.4f}, "
+                    f"{np.percentile(combined_samples[:,d],95):.4f}]\n")
+        f.write("\n")
         for s_idx, (samp, m) in enumerate(zip(all_samples, meta)):
             f.write(f"Session {s_idx+1}  ({m['session_datetime']})  "
                     f"n={m['n_trials']}  acc={m['accuracy']:.3f}\n")

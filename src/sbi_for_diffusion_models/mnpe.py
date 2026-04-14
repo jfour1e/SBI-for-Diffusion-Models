@@ -62,7 +62,7 @@ def _build_npe_embedding_net(cfg, *, T: int, P: int) -> torch.nn.Module:
 def _build_npe_estimator_builder(cfg, embedding_net):
     """Build the SBI posterior density-estimator factory."""
     return posterior_nn(
-        model="zuko_nsf",
+        model="nsf",
         z_score_theta="independent",
         z_score_x="none",
         hidden_features=int(cfg.NPE_HIDDEN_FEATURES),
@@ -250,7 +250,7 @@ def load_npe(
     )
 
     est_builder = posterior_nn(
-        model="zuko_nsf",
+        model="nsf",
         z_score_theta="independent",
         z_score_x="none",
         hidden_features=int(saved_cfg.NPE_HIDDEN_FEATURES),

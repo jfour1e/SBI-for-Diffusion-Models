@@ -83,7 +83,7 @@ def load_marmoset_sessions(
     csv_path: str,
     animal: str,
     stage: str = "70-30",
-    num_trials_per_session: int = 256,
+    num_trials_per_session: int | None = None,
     log_rt: bool = True,
     pulse_interval: float = float(PULSE_INTERVAL),
     p_max: int = P_MAX,
@@ -94,8 +94,10 @@ def load_marmoset_sessions(
     Load and preprocess marmoset behavioral data into NPE-ready session tensors.
 
     Groups data by session_datetime.  Sessions with fewer than `min_trials`
-    trials are skipped.  Sessions longer than `num_trials_per_session` are
-    randomly subsampled (reproducibly via `seed`).
+    trials are skipped.  If `num_trials_per_session` is set, sessions longer
+    than that are randomly subsampled (reproducibly via `seed`); the default
+    None uses all available trials (valid because the embedding is
+    permutation-invariant and handles any trial count).
 
     Returns
     -------
@@ -122,8 +124,8 @@ def load_marmoset_sessions(
         if len(grp) < min_trials:
             continue
 
-        # Subsample if needed
-        if len(grp) > num_trials_per_session:
+        # Subsample if a cap was requested
+        if num_trials_per_session is not None and len(grp) > num_trials_per_session:
             idx = rng.choice(len(grp), size=num_trials_per_session, replace=False)
             idx.sort()
             grp = grp.iloc[idx].reset_index(drop=True)
@@ -163,9 +165,10 @@ def load_marmoset_sessions(
             "rt_median": float(grp["rt"].median()),
         })
 
+    cap_str = str(num_trials_per_session) if num_trials_per_session is not None else "all"
     print(
         f"Loaded {len(sessions)} sessions for {animal} ({stage})  "
-        f"[T_per_session up to {num_trials_per_session}, P={p_max}]"
+        f"[T_per_session={cap_str}, P={p_max}]"
     )
     for m in session_meta:
         print(
