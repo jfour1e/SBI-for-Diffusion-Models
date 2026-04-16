@@ -1,15 +1,3 @@
-"""
-Fit the pretrained lapse NPE to real marmoset behavioral data.
-
-Loads Helios (or any animal) 70-30 sessions, converts flash sequences to
-the model's pulse format, samples the posterior for each session, and plots.
-
-Usage
------
-  python fit_marmoset.py
-  ANIMAL=Carter python fit_marmoset.py
-  MODEL_NAME=base ANIMAL=Helios python fit_marmoset.py
-"""
 from __future__ import annotations
 
 import os
@@ -62,18 +50,15 @@ def get_spec(model_name: str) -> dict:
     raise ValueError(model_name)
 
 def load_npe(model_path: str, prior_theta, device: str):
-    """Load the NPE and decouple the embedding net so we can feed variable-length sessions.
-
-    Returns the density estimator (with Identity embedding), the original
-    embedding net (accepts any trial count), the saved config, and T used
-    during training.
+    """
+    Load the NPE and decouple the embedding net so we can feed variable-length sessions.
     """
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    saved_cfg  = checkpoint["config"]
-    dev        = torch.device(device)
+    saved_cfg = checkpoint["config"]
+    dev = torch.device(device)
 
-    P         = max_num_pulses()
-    T         = int(saved_cfg.NUM_TRIALS_OBS)
+    P = max_num_pulses()
+    T = int(saved_cfg.NUM_TRIALS_OBS)
     trial_dim = 2 + P
     theta_dim = int(torch.as_tensor(prior_theta.sample((1,))).reshape(-1).numel())
 
@@ -106,9 +91,7 @@ def load_npe(model_path: str, prior_theta, device: str):
     de.to(dev).eval()
 
     # Extract the trained embedding net and replace it with Identity so that
-    # DirectPosterior skips the shape check on the raw x.  We will pre-embed
-    # variable-length sessions ourselves before calling posterior.sample().
-    embedding_net = de.net._embedding_net          # trained PermutationInvariantEmbedding
+    embedding_net = de.net._embedding_net   
     emb_out_dim   = int(saved_cfg.NPE_EMBEDDING_OUTPUT_DIM)
     de.net._embedding_net = torch.nn.Identity()
     de._condition_shape   = torch.Size([emb_out_dim])
@@ -120,13 +103,13 @@ def main() -> None:
     np.random.seed(SEED)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dev    = torch.device(device)
+    dev = torch.device(device)
     print(f"Animal: {ANIMAL}  Stage: {STAGE}  Model: {MODEL_NAME}  device: {device}")
 
-    spec        = get_spec(MODEL_NAME)
+    spec = get_spec(MODEL_NAME)
     prior_theta = spec["prior_builder"]()
     param_names = spec["param_names"]
-    D           = len(param_names)
+    D = len(param_names)
 
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
@@ -157,7 +140,7 @@ def main() -> None:
 
     os.makedirs(OUTDIR, exist_ok=True)
 
-    # ── Combined posterior (all trials from all sessions) ──
+    # Combined posterior
     P = max_num_pulses()
     trial_dim = 2 + P
     all_trials = torch.cat(
@@ -188,7 +171,7 @@ def main() -> None:
     plt.close(fig)
     print("  Saved:", fig_path)
 
-    # ── Per-session posteriors ──
+    # Per-session posteriors
     all_samples = []
 
     for s_idx, (x_flat, m) in enumerate(zip(sessions, meta)):
@@ -222,7 +205,7 @@ def main() -> None:
         plt.close(fig)
         print("  Saved:", fig_path)
 
-    # ── Overlay: prior vs combined vs per-session ──
+    # prior vs combined vs per-session
     ncols = min(D, 4)
     nrows = int(np.ceil(D / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows))
@@ -277,7 +260,3 @@ def main() -> None:
                         f"{np.percentile(samp[:,d],95):.4f}]\n")
             f.write("\n")
     print("Saved:", summary_path)
-
-
-if __name__ == "__main__":
-    main()

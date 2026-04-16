@@ -1,24 +1,3 @@
-"""
-Marmoset behavioral data loader.
-
-Converts the raw CSV flash sequences into the flat tensor format expected by
-the NPE embedding: (num_sessions, T * (2 + P)) where each trial row is
-    [log(rt), choice, pulse_0, pulse_1, ..., pulse_{P-1}]
-
-Pulse convention
-----------------
-- pulse_k = +1  if the flash at bin k was on the RIGHT side
-- pulse_k = -1  if the flash at bin k was on the LEFT side
-- pulse_k =  0  if no pulse was presented (bins after the decision, or missing)
-
-Choice convention
------------------
-- choice = 1  if the animal chose RIGHT
-- choice = 0  if the animal chose LEFT
-
-This matches the training simulator convention (upper boundary = right = 1).
-a0 > 0.5 therefore means a rightward starting bias; a0 < 0.5 means leftward.
-"""
 from __future__ import annotations
 
 import math
@@ -32,7 +11,6 @@ from .run_config import PULSE_INTERVAL, T_MAX
 # Maximum number of pulse bins consistent with current config
 P_MAX = int(float(T_MAX) / float(PULSE_INTERVAL))  # 40
 
-
 def _flash_string_to_pulses(
     flashes_left: str,
     flashes_right: str,
@@ -42,17 +20,6 @@ def _flash_string_to_pulses(
 ) -> np.ndarray:
     """
     Convert a pair of binary flash strings for one trial to a ±1/0 pulse vector.
-
-    Parameters
-    ----------
-    flashes_left / flashes_right : binary strings, length = number of pulses shown
-    rt : reaction time in seconds
-    pulse_interval : seconds per flash bin (250 ms)
-    p_max : total pulse slots in the model (pad/truncate to this length)
-
-    Returns
-    -------
-    pulses : np.ndarray, shape (p_max,), values in {-1, 0, +1}
     """
     n_shown = len(flashes_left)  # string length = number of presented pulses
     n_shown = min(n_shown, p_max)
@@ -92,23 +59,14 @@ def load_marmoset_sessions(
 ) -> tuple[list[Tensor], list[dict]]:
     """
     Load and preprocess marmoset behavioral data into NPE-ready session tensors.
-
-    Groups data by session_datetime.  Sessions with fewer than `min_trials`
-    trials are skipped.  If `num_trials_per_session` is set, sessions longer
-    than that are randomly subsampled (reproducibly via `seed`); the default
-    None uses all available trials (valid because the embedding is
-    permutation-invariant and handles any trial count).
-
-    Returns
-    -------
-    sessions : list of Tensor, each shape (1, T * (2 + P))
-        Flat session vectors ready for posterior.sample(x=...)
-    session_meta : list of dict
-        Metadata for each session (datetime, n_trials, accuracy, etc.)
     """
     rng = np.random.default_rng(seed)
-
-    df = pd.read_csv(csv_path)
+  
+    df = pd.read_csv(
+        csv_path,
+        compression="infer",
+        dtype={"flashes_left": str, "flashes_right": str},
+    )
     df = df[(df["name"] == animal) & (df["stage"] == stage)].copy()
 
     if len(df) == 0:

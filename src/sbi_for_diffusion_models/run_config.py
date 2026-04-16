@@ -18,21 +18,24 @@ class RunConfig:
 # Data / simulator settings
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.7
-    NUM_TRIALS_OBS : int = 256
 
     # We recommend log-transforming RT but NOT the categorical choice.
     LOG_RT_MANUALLY: bool = True
     THETA_TRUE_FROM_PRIOR: bool = True
 
     # NPE settings
+    NUM_TRIALS_OBS : int = 512
     NPE_NUM_SESSIONS: int = 20
-    NPE_TRAIN_BATCH_SIZE: int = 512
-    NPE_HIDDEN_FEATURES: int = 256   # flow hidden dim (was 192)
-    NPE_NUM_TRANSFORMS: int = 10      # NSF coupling layers (was 5)
-    NPE_NUM_BINS: int = 12           # spline bins per transform (was 8)
+    NPE_HIDDEN_FEATURES: int = 256   # flow hidden dim 
+    NPE_NUM_TRANSFORMS: int = 10     # NSF coupling layers 
+    NPE_NUM_BINS: int = 12           # spline bins per transform
     NPE_SESSIONS_PER_STEP: int = 256
-    NPE_NUM_STEPS: int = 10000       # training steps (was 300)
-    NPE_LR: float = 3e-4             # slightly lower LR for larger model (was 5e-4)
+    NPE_NUM_STEPS: int = 10000       # training steps
+    NPE_LR: float = 3e-4             # slightly lower LR for larger model
+
+    # Simulation Reservoir settings
+    NPE_RESERVOIR_SIZE: int = 1_000  
+    NPE_RESERVOIR_REFRESH_FRAC: float = 0.0  # percentages of reservoir sims to resample to prevent staleness
 
     # Embedding network (DeepSets)
     NPE_TRIAL_NET_HIDDEN: int = 256  # per-trial MLP width (was 128)
