@@ -1,51 +1,29 @@
 from __future__ import annotations
 
 import os
-from typing import Optional, Sequence, Tuple, Callable 
+from typing import Optional, Sequence, Callable
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 
-from sbi.inference import NPE
 from sbi.neural_nets import posterior_nn
 from sbi.inference.posteriors import DirectPosterior
 
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
-from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
+from sbi_for_diffusion_models.data_simulator import (
+    simulate_training_sessions,
+    trial_feature_dim,
+)
 from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
 
-@torch.no_grad()
-def simulate_npe_training_data(
-    cfg,
-    prior_theta,
-    *,
-    simulate_batch_fn: Callable,
-    device: torch.device,
-    seed: int = 0,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Simulate session-level training pairs (theta, x) for NPE.
-    Returns theta_train of shape (N, D) and flattened x_train of shape (N, T*(2+P)).
-    """
-    P = max_num_pulses()
-    theta_train, x_train = simulate_training_sessions(
-        prior_theta,
-        num_sessions=int(cfg.NPE_NUM_SESSIONS),
-        num_trials=int(cfg.NUM_TRIALS_OBS),
-        simulate_batch_fn=simulate_batch_fn, 
-        device=device,
-        mu_sensory=float(cfg.MU_SENSORY),
-        p_success=float(cfg.P_SUCCESS),
-        P=P,
-        log_rt=bool(cfg.LOG_RT_MANUALLY),
-        seed=int(seed),
-    )
-    return theta_train, x_train
+
+def _p_success_training_values(cfg):
+    return tuple(getattr(cfg, "P_SUCCESS_TRAIN_VALUES", (float(cfg.P_SUCCESS),)))
+
 
 def _build_npe_embedding_net(cfg, *, T: int, P: int) -> torch.nn.Module:
-    """Build the permutation-invariant session embedding network."""
-    trial_dim = 2 + P
+    trial_dim = trial_feature_dim(P)
 
     return PermutationInvariantEmbedding(
         num_trials=T,
@@ -59,8 +37,8 @@ def _build_npe_embedding_net(cfg, *, T: int, P: int) -> torch.nn.Module:
         aggregation=str(cfg.NPE_AGG_FN),
     )
 
+
 def _build_npe_estimator_builder(cfg, embedding_net):
-    """Build the SBI posterior density-estimator factory."""
     return posterior_nn(
         model="nsf",
         z_score_theta="independent",
@@ -71,8 +49,8 @@ def _build_npe_estimator_builder(cfg, embedding_net):
         embedding_net=embedding_net,
     )
 
+
 def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev: torch.device, seed: int, T: int, P: int):
-    """Simulate a small batch used to initialize estimator input shapes."""
     return simulate_training_sessions(
         prior_theta,
         num_sessions=2,
@@ -80,107 +58,11 @@ def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev:
         simulate_batch_fn=simulate_batch_fn,
         device=dev,
         mu_sensory=float(cfg.MU_SENSORY),
-        p_success=float(cfg.P_SUCCESS),
+        p_success=_p_success_training_values(cfg),
         P=P,
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=int(seed),
     )
-
-# session reservior class
-class SessionReservoir:
-    """
-    Pre-simulated pool of (theta, x) session pairs for fast mini-batch sampling.
-    """
-
-    def __init__(self, theta: torch.Tensor, x: torch.Tensor, device: torch.device):
-        self.theta = theta  # (R, D)
-        self.x = x          # (R, T * trial_dim)
-        self.device = device
-        self.size = theta.shape[0]
-
-    @classmethod
-    def build(
-        cls,
-        cfg,
-        prior_theta,
-        simulate_batch_fn: Callable,
-        device: torch.device,
-        seed: int = 0,
-    ) -> "SessionReservoir":
-        """
-        Simulate the full reservoir upfront.
-        """
-        R = int(getattr(cfg, "NPE_RESERVOIR_SIZE", cfg.NPE_NUM_SESSIONS))
-        P = max_num_pulses()
-        T = int(cfg.NUM_TRIALS_OBS)
-
-        print(f"[Reservoir] Simulating {R} sessions (T={T}, P={P}) ...")
-
-        theta_all, x_all = simulate_training_sessions(
-            prior_theta,
-            num_sessions=R,
-            num_trials=T,
-            simulate_batch_fn=simulate_batch_fn,
-            device=device,
-            mu_sensory=float(cfg.MU_SENSORY),
-            p_success=float(cfg.P_SUCCESS),
-            P=P,
-            log_rt=bool(cfg.LOG_RT_MANUALLY),
-            seed=int(seed),
-        )
-
-        theta_all = theta_all.to(device, dtype=torch.float32)
-        x_all = x_all.to(device, dtype=torch.float32)
-
-        return cls(theta_all, x_all, device)
-    
-    def sample_batch(
-        self, batch_size: int, generator: Optional[torch.Generator] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Sample a mini-batch with replacement from the reservoir."""
-        idx = torch.randint(
-            0, self.size, (batch_size,),
-            device=self.device, generator=generator,
-        )
-        return self.theta[idx], self.x[idx]
-
-    @torch.no_grad()
-    def partial_refresh(
-        self,
-        cfg,
-        prior_theta,
-        simulate_batch_fn: Callable,
-        frac: float,
-        seed: int,
-    ) -> int:
-        """
-        Replace a random fraction of the reservoir with freshly simulated sessions.
-
-        Returns the number of sessions replaced.
-        """
-        n_replace = max(1, int(frac * self.size))
-        P = max_num_pulses()
-        T = int(cfg.NUM_TRIALS_OBS)
-
-        theta_new, x_new = simulate_training_sessions(
-            prior_theta,
-            num_sessions=n_replace,
-            num_trials=T,
-            simulate_batch_fn=simulate_batch_fn,
-            device=self.device,
-            mu_sensory=float(cfg.MU_SENSORY),
-            p_success=float(cfg.P_SUCCESS),
-            P=P,
-            log_rt=bool(cfg.LOG_RT_MANUALLY),
-            seed=seed,
-        )
-
-        # Pick random slots to overwrite
-        idx = torch.randperm(self.size, device=self.device)[:n_replace]
-        self.theta[idx] = theta_new.to(self.device, dtype=torch.float32)
-        self.x[idx] = x_new.to(self.device, dtype=torch.float32)
-
-        return n_replace
 
 
 def train_npe_session(
@@ -192,11 +74,9 @@ def train_npe_session(
     seed: int = 0,
     resume_from: Optional[str] = None,
     seed_offset: int = 0,
+    checkpoint_path: Optional[str] = None,
+    checkpoint_every: int = 0,
 ):
-    """
-    Train an amortized NPE posterior on simulated RT-choice sessions.
-    Simulates session batches on the fly and returns the fitted estimator and DirectPosterior.
-    """
     dev = torch.device(device)
     torch.manual_seed(int(seed))
 
@@ -228,13 +108,33 @@ def train_npe_session(
         density_estimator.load_state_dict(checkpoint["state_dict"], strict=True)
         print(f"[NPE] Resumed weights from {resume_from}")
 
-    # build reservoir 
-    reservoir = SessionReservoir.build(
-        cfg, prior_theta, simulate_batch_fn,
-        device=dev, seed=int(seed + seed_offset),
-    )
+    val_sessions = int(getattr(cfg, "NPE_VAL_SESSIONS", 0))
+    val_every = int(getattr(cfg, "NPE_VAL_EVERY", 100))
+    val_patience = int(getattr(cfg, "NPE_VAL_PATIENCE", 20))
+    val_min_delta = float(getattr(cfg, "NPE_VAL_MIN_DELTA", 1e-3))
+    val_batch = int(getattr(cfg, "NPE_VAL_BATCH", 512))
+    val_seed_offset = int(getattr(cfg, "NPE_VAL_SEED_OFFSET", 999_983))
+    use_val = val_sessions > 0 and val_every > 0
 
-    # training loop 
+    theta_val = x_val = None
+    if use_val:
+        print(f"[NPE] Building held-out val set: {val_sessions} sessions ...")
+        theta_val, x_val = simulate_training_sessions(
+            prior_theta,
+            num_sessions=val_sessions,
+            num_trials=T,
+            simulate_batch_fn=simulate_batch_fn,
+            device=dev,
+            mu_sensory=float(cfg.MU_SENSORY),
+            p_success=_p_success_training_values(cfg),
+            P=P,
+            log_rt=bool(cfg.LOG_RT_MANUALLY),
+            seed=int(seed + val_seed_offset),
+            warn_on_timeouts=False,
+        )
+        theta_val = theta_val.to(dev, dtype=torch.float32)
+        x_val = x_val.to(dev, dtype=torch.float32)
+
     density_estimator.train()
 
     lr = float(getattr(cfg, "NPE_LR", 5e-4))
@@ -242,23 +142,59 @@ def train_npe_session(
 
     sess_per_step = int(getattr(cfg, "NPE_SESSIONS_PER_STEP", 8))
     num_steps = int(getattr(cfg, "NPE_NUM_STEPS", 10_000))
-    refresh_frac = float(getattr(cfg, "NPE_RESERVOIR_REFRESH_FRAC", 0.0))
 
-    print(f"[NPE] device={dev}, sess_per_step={sess_per_step}, num_steps={num_steps}, lr={lr}")
+    print(
+        f"[NPE] device={dev}, sess_per_step={sess_per_step}, "
+        f"num_steps={num_steps}, lr={lr}, val={'on' if use_val else 'off'}"
+    )
 
-    best = float("inf")
-    bad = 0
-    patience = int(getattr(cfg, "NPE_PATIENCE", 30))
-    min_delta = float(getattr(cfg, "NPE_MIN_DELTA", 1e-3))
     ema_beta = float(getattr(cfg, "NPE_EMA_BETA", 0.98))
     ema = None
 
-    train_gen = torch.Generator(device=dev)
-    train_gen.manual_seed(int(seed + 900))
+    best_val = float("inf")
+    bad_val = 0
+    best_train = float("inf")
+    bad_train = 0
+    train_patience = int(getattr(cfg, "NPE_PATIENCE", 30))
+    train_min_delta = float(getattr(cfg, "NPE_MIN_DELTA", 1e-3))
+    best_state_dict = None
+
+    sim_seed_base = int(seed + seed_offset + 1)
+
+    def _compute_val_loss() -> float:
+        density_estimator.eval()
+        with torch.no_grad():
+            n = theta_val.shape[0]
+            total = 0.0
+            count = 0
+            for s in range(0, n, val_batch):
+                e = min(n, s + val_batch)
+                losses = density_estimator.loss(
+                    theta_val[s:e], condition=x_val[s:e]
+                )
+                total += float(losses.sum().item())
+                count += int(e - s)
+        density_estimator.train()
+        return total / max(1, count)
 
     for step in range(num_steps):
-        
-        theta_b, x_b = reservoir.sample_batch(sess_per_step, generator=train_gen)
+
+        with torch.no_grad():
+            theta_b, x_b = simulate_training_sessions(
+                prior_theta,
+                num_sessions=sess_per_step,
+                num_trials=T,
+                simulate_batch_fn=simulate_batch_fn,
+                device=dev,
+                mu_sensory=float(cfg.MU_SENSORY),
+                p_success=_p_success_training_values(cfg),
+                P=P,
+                log_rt=bool(cfg.LOG_RT_MANUALLY),
+                seed=sim_seed_base + step,
+                warn_on_timeouts=False,
+            )
+            theta_b = theta_b.to(dev, dtype=torch.float32)
+            x_b = x_b.to(dev, dtype=torch.float32)
 
         optimizer.zero_grad(set_to_none=True)
         losses = density_estimator.loss(theta_b, condition=x_b)
@@ -272,32 +208,65 @@ def train_npe_session(
         if (step + 1) % 50 == 0:
             print(f"step {step + 1}: loss={li:.4f} ema={ema:.4f}")
 
-            if ema < best - min_delta:
-                best = ema
-                bad = 0
-            else:
-                bad += 1
-                if bad >= patience:
-                    print(f"[NPE] early stop at step {step + 1}")
-                    break
-    
-    if refresh_frac > 0 and (step + 1):
-            n_replaced = reservoir.partial_refresh(
-                cfg, prior_theta, simulate_batch_fn,
-                frac=refresh_frac,
-                seed=int(seed + step + seed_offset + 10_000),
+        if use_val and (step + 1) % val_every == 0:
+            val_loss = _compute_val_loss()
+            improved = val_loss < best_val - val_min_delta
+            marker = "*" if improved else " "
+            print(
+                f"[VAL] step {step + 1}: val_loss={val_loss:.4f} "
+                f"(best={best_val:.4f}) {marker}"
             )
-            print(f"[NPE] Refreshed {n_replaced}/{reservoir.size} reservoir sessions")
+            if improved:
+                best_val = val_loss
+                bad_val = 0
+                best_state_dict = {
+                    k: v.detach().clone() for k, v in density_estimator.state_dict().items()
+                }
+            else:
+                bad_val += 1
+                if bad_val >= val_patience:
+                    print(
+                        f"[NPE] early stop at step {step + 1} "
+                        f"(no val improvement for {val_patience} evals)"
+                    )
+                    break
+        elif not use_val and (step + 1) % 50 == 0:
+            if ema < best_train - train_min_delta:
+                best_train = ema
+                bad_train = 0
+            else:
+                bad_train += 1
+                if bad_train >= train_patience:
+                    print(f"[NPE] early stop (EMA) at step {step + 1}")
+                    break
+
+        if (
+            checkpoint_path is not None
+            and checkpoint_every > 0
+            and (step + 1) % int(checkpoint_every) == 0
+        ):
+            os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
+            torch.save(
+                {
+                    "state_dict": density_estimator.state_dict(),
+                    "config": cfg,
+                    "step": step + 1,
+                    "best_val": best_val if use_val else None,
+                },
+                checkpoint_path,
+            )
+            print(f"[NPE] checkpoint saved at step {step + 1}: {checkpoint_path}")
+
+    if use_val and best_state_dict is not None:
+        density_estimator.load_state_dict(best_state_dict, strict=True)
+        print(f"[NPE] Restored best-val weights (val_loss={best_val:.4f})")
 
     density_estimator.eval()
     posterior = DirectPosterior(density_estimator, prior_theta)
     return density_estimator, posterior
 
+
 def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta):
-    """
-    Draw posterior samples from the amortized NPE model for one observed session.
-    Expects x_o_flat to match the flattened training representation used during fitting.
-    """
     posterior = inference_obj.build_posterior(
         density_estimator=density_estimator,
         prior=prior_theta,
@@ -317,13 +286,14 @@ def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_the
     )
     return samples
 
+
 def load_npe(
     model_path: str,
     *,
     prior_theta,
     device: str = "cpu",
 ):
-    """Rebuild the exact NPE architecture and load saved weights."""
+    """Rebuild the NPE architecture from a saved config and load its weights."""
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     saved_cfg = checkpoint["config"]
 
@@ -331,7 +301,7 @@ def load_npe(
 
     P = max_num_pulses()
     T = int(saved_cfg.NUM_TRIALS_OBS)
-    trial_dim = 2 + P
+    trial_dim = trial_feature_dim(P)
     x_dim = T * trial_dim
 
     theta_probe = torch.as_tensor(
@@ -341,29 +311,9 @@ def load_npe(
     ).reshape(-1)
     theta_dim = int(theta_probe.numel())
 
-    embedding_net = PermutationInvariantEmbedding(
-        num_trials=T,
-        trial_dim=trial_dim,
-        trial_net_hidden=int(saved_cfg.NPE_TRIAL_NET_HIDDEN),
-        trial_net_layers=int(saved_cfg.NPE_TRIAL_NET_LAYERS),
-        trial_net_output_dim=int(saved_cfg.NPE_TRIAL_NET_OUTPUT_DIM),
-        post_agg_hidden=int(saved_cfg.NPE_POST_AGG_HIDDEN),
-        post_agg_layers=int(saved_cfg.NPE_POST_AGG_LAYERS),
-        output_dim=int(saved_cfg.NPE_EMBEDDING_OUTPUT_DIM),
-        aggregation=str(saved_cfg.NPE_AGG_FN),
-    )
+    embedding_net = _build_npe_embedding_net(saved_cfg, T=T, P=P)
+    est_builder = _build_npe_estimator_builder(saved_cfg, embedding_net)
 
-    est_builder = posterior_nn(
-        model="nsf",
-        z_score_theta="independent",
-        z_score_x="none",
-        hidden_features=int(saved_cfg.NPE_HIDDEN_FEATURES),
-        num_transforms=int(saved_cfg.NPE_NUM_TRANSFORMS),
-        num_bins=int(saved_cfg.NPE_NUM_BINS),
-        embedding_net=embedding_net,
-    )
-
-    # SBI builder requires dummy inputs to instantiate the nn.Module.
     dummy_theta = torch.randn(2, theta_dim, device=dev)
     dummy_x = torch.randn(2, x_dim, device=dev)
     density_estimator = est_builder(dummy_theta, dummy_x)
@@ -374,8 +324,27 @@ def load_npe(
 
     return density_estimator, saved_cfg
 
+
+def load_npe_decoupled(
+    model_path: str,
+    *,
+    prior_theta,
+    device: str = "cpu",
+):
+    """Load NPE and detach the embedding net so callers can feed variable-length x.
+
+    Returns (density_estimator_with_identity_embedding, embedding_net, saved_cfg, T).
+    """
+    de, saved_cfg = load_npe(model_path, prior_theta=prior_theta, device=device)
+    T = int(saved_cfg.NUM_TRIALS_OBS)
+    embedding_net = de.net._embedding_net
+    emb_out_dim = int(saved_cfg.NPE_EMBEDDING_OUTPUT_DIM)
+    de.net._embedding_net = torch.nn.Identity()
+    de._condition_shape = torch.Size([emb_out_dim])
+    return de, embedding_net, saved_cfg, T
+
+
 def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) -> torch.Tensor:
-    """Compute SBC ranks for each parameter dimension."""
     theta_true = theta_true.reshape(-1)
     return (posterior_samples < theta_true[None, :]).sum(dim=0).to(torch.int64)
 
@@ -383,11 +352,10 @@ def _compute_ranks(theta_true: torch.Tensor, posterior_samples: torch.Tensor) ->
 def _plot_sbc_rank_histograms(
     ranks: np.ndarray,
     *,
-    param_names: Optional[Sequence[str]] = None, 
+    param_names: Optional[Sequence[str]] = None,
     outpath: Optional[str] = None,
     bins: int = 30,
 ):
-    """Plot per-parameter SBC rank histograms."""
     D = ranks.shape[1]
     fig, axes = plt.subplots(D, 1, figsize=(8, 2.5 * D), constrained_layout=True)
     if D == 1:
@@ -406,6 +374,7 @@ def _plot_sbc_rank_histograms(
 
     return fig
 
+
 @torch.no_grad()
 def run_sbc_npe(
     cfg,
@@ -417,14 +386,10 @@ def run_sbc_npe(
     num_datasets: int = 100,
     posterior_samples_per_dataset: Optional[int] = None,
     seed: int = 0,
-    param_names: Optional[Sequence[str]] = None, 
+    param_names: Optional[Sequence[str]] = None,
     outdir: str = "sbc_npe_outputs",
     plot_bins: int = 30,
 ) -> dict:
-    """
-    Run simulation-based calibration for the NPE pipeline.
-    Simulates datasets from the prior, samples posteriors, and saves rank diagnostics.
-    """
     os.makedirs(outdir, exist_ok=True)
 
     dev = torch.device(device)
@@ -439,9 +404,8 @@ def run_sbc_npe(
 
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
-    trial_dim = 2 + P
+    trial_dim = trial_feature_dim(P)
 
-    # infer theta dimension from prior
     theta_probe = torch.as_tensor(
         prior_theta.sample((1,)),
         device=dev,
@@ -470,7 +434,7 @@ def run_sbc_npe(
             simulate_batch_fn=simulate_batch_fn,
             device=dev,
             mu_sensory=float(cfg.MU_SENSORY),
-            p_success=float(cfg.P_SUCCESS),
+            p_success=_p_success_training_values(cfg),
             P=P,
             log_rt=bool(cfg.LOG_RT_MANUALLY),
             seed=int(rng.integers(0, 2**31 - 1)),

@@ -1,27 +1,9 @@
-"""
-Posterior Update Check.
+"""Posterior update check.
 
-For a pretrained NPE, test whether the posterior actually moves relative to
-the prior on UNSEEN simulated data (data not seen during training).
-
-For each of N_TEST datasets:
-  1. Draw theta_true ~ prior
-  2. Simulate a session from theta_true
-  3. Sample the posterior p(theta | x)
-  4. Compute per-parameter posterior contraction:
-       contraction_d = 1 - std(posterior_d) / std(prior_d)
-     A contraction near 1 = posterior is tight; near 0 = posterior ~= prior.
-
-Plots:
-  1. Contraction per parameter (boxplot across test datasets)
-  2. Overlay: prior marginals vs posterior marginals (one representative session)
-  3. Pairplot of posterior vs theta_true for a few sessions
-
-Usage
------
-  python posterior_update_check.py
-  MODEL_NAME=base python posterior_update_check.py
-  N_TEST=50 python posterior_update_check.py
+For each of N_TEST simulated datasets, draws theta from the prior, simulates
+a session, samples the posterior, and reports per-parameter contraction
+(1 - sigma_post / sigma_prior). Writes a boxplot, prior-vs-posterior overlay,
+and a pairplot for one example session.
 """
 from __future__ import annotations
 
@@ -36,13 +18,12 @@ torch.distributions.Distribution.set_default_validate_args(False)
 
 from sbi.analysis import pairplot
 from sbi.inference.posteriors import DirectPosterior
-from sbi.neural_nets import posterior_nn
 
 from sbi_for_diffusion_models.priors import build_prior_theta, build_prior_theta_lapse
 from sbi_for_diffusion_models.models.rt_choice_model import simulate_rt_choice_batch, max_num_pulses
 from sbi_for_diffusion_models.models.lapse_rt_choice_model import simulate_rt_choice_batch_lapse
 from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
-from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
+from sbi_for_diffusion_models.mnpe import load_npe
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 
 cfg = RUN_CONFIG_PARAMS
@@ -64,7 +45,7 @@ def get_spec(model_name: str) -> dict:
             param_names=["a0", "lam", "v", "B", "tau"],
             model_file="npe_rt_choice_base.pt",
         )
-    elif model_name == "lapse":
+    if model_name == "lapse":
         return dict(
             prior_builder=build_prior_theta_lapse,
             simulate_batch_fn=simulate_rt_choice_batch_lapse,
@@ -72,46 +53,6 @@ def get_spec(model_name: str) -> dict:
             model_file="npe_rt_choice_lapse.pt",
         )
     raise ValueError(model_name)
-
-
-def load_npe(model_path: str, prior_theta, device: str):
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    saved_cfg  = checkpoint["config"]
-    dev        = torch.device(device)
-
-    P          = max_num_pulses()
-    T          = int(saved_cfg.NUM_TRIALS_OBS)
-    trial_dim  = 2 + P
-    theta_dim  = int(torch.as_tensor(prior_theta.sample((1,))).reshape(-1).numel())
-
-    emb = PermutationInvariantEmbedding(
-        num_trials=T,
-        trial_dim=trial_dim,
-        trial_net_hidden=int(saved_cfg.NPE_TRIAL_NET_HIDDEN),
-        trial_net_layers=int(saved_cfg.NPE_TRIAL_NET_LAYERS),
-        trial_net_output_dim=int(saved_cfg.NPE_TRIAL_NET_OUTPUT_DIM),
-        post_agg_hidden=int(saved_cfg.NPE_POST_AGG_HIDDEN),
-        post_agg_layers=int(saved_cfg.NPE_POST_AGG_LAYERS),
-        output_dim=int(saved_cfg.NPE_EMBEDDING_OUTPUT_DIM),
-        aggregation=str(saved_cfg.NPE_AGG_FN),
-    )
-    est_builder = posterior_nn(
-        model="nsf",
-        z_score_theta="independent",
-        z_score_x="none",
-        hidden_features=int(saved_cfg.NPE_HIDDEN_FEATURES),
-        num_transforms=int(saved_cfg.NPE_NUM_TRANSFORMS),
-        num_bins=int(saved_cfg.NPE_NUM_BINS),
-        embedding_net=emb,
-    )
-    x_dim = T * trial_dim
-    de = est_builder(
-        torch.randn(2, theta_dim, device=dev),
-        torch.randn(2, x_dim,    device=dev),
-    )
-    de.load_state_dict(checkpoint["state_dict"], strict=True)
-    de.to(dev).eval()
-    return de, saved_cfg
 
 
 def main() -> None:
@@ -133,7 +74,7 @@ def main() -> None:
 
     model_path = os.path.join(MODEL_DIR, spec["model_file"])
     print(f"Loading model from {model_path} ...")
-    de, saved_cfg = load_npe(model_path, prior_theta, device)
+    de, saved_cfg = load_npe(model_path, prior_theta=prior_theta, device=device)
 
     posterior = DirectPosterior(
         posterior_estimator=de,
@@ -145,13 +86,11 @@ def main() -> None:
     T = int(saved_cfg.NUM_TRIALS_OBS)
     os.makedirs(OUTDIR, exist_ok=True)
 
-    # --- Prior samples for reference std ---
     prior_samples = torch.as_tensor(
         prior_theta.sample((N_PRIOR,)), dtype=torch.float32
     ).cpu()
-    prior_std = prior_samples.std(dim=0).numpy()  # (D,)
+    prior_std = prior_samples.std(dim=0).numpy()
 
-    # --- Per-test-dataset posterior samples ---
     all_contractions = np.zeros((N_TEST, D))
     all_post_stds    = np.zeros((N_TEST, D))
     all_theta_true   = np.zeros((N_TEST, D))
@@ -209,7 +148,7 @@ def main() -> None:
     plt.close(fig)
     print("Saved:", path)
 
-    post0 = all_post_samples[0]   # (N_POST, D)
+    post0 = all_post_samples[0]
     ncols = min(D, 4)
     nrows = int(np.ceil(D / ncols))
     fig, axes = plt.subplots(nrows, ncols, figsize=(4 * ncols, 3 * nrows))
@@ -246,8 +185,8 @@ def main() -> None:
 
     summary_path = os.path.join(OUTDIR, "summary.txt")
     with open(summary_path, "w") as f:
-        f.write(f"Posterior Update Check Summary\n")
-        f.write(f"==============================\n")
+        f.write("Posterior Update Check Summary\n")
+        f.write("==============================\n")
         f.write(f"Model: {MODEL_NAME}  N_test: {N_TEST}  N_post: {N_POST}\n\n")
         f.write(f"{'param':>10}  {'prior_std':>10}  {'post_std_mean':>14}  {'contraction':>12}\n")
         for d, name in enumerate(param_names):

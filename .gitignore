@@ -1,25 +1,38 @@
-/src/notebooks/sbi-logs
-/src/sbi_for_diffusion_models/__pycache__
-/sbi-logs/MNLE/2026-01-02T19_13_31.902318
-/sbi-logs/MNLE
-/models/mnle_rt_choice.pt
-/models/npe_rt_choice.pt
-sbi-logs/NPE_C
-/npe_outputs
-/sbc_outputs
-marmoset_data.csv.gz
-CLAUDE.md
+# Python
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Environments
+.venv/
+.env
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Trained model weights (large binaries)
+models/
+*.pt
+
+# Run outputs (auto-generated; do not commit)
+logs/
+sbi-logs/
+sbc_outputs/
+sbc_outputs_lapse/
+npe_outputs/
+npe_outputs_lapse/
+marmoset_outputs/
+marmoset_outputs_mixed/
+group_outputs/
+group_outputs_all_stages/
 prior_predictive_outputs/
+prior_predictive_outputs_v3/
+posterior_update_outputs/
 
-# output files
-/sbc_outputs
-/logs
-/marmoset_outputs
-/models
-/npe_outputs_lapse
-/prior_predictive_outputs_v3
-/sbc_outputs_lapse
-/posterior_update_outputs
+# Local data
+marmoset_data.csv.gz
 
-# job scripts
+# Cluster job scripts
 *.sh

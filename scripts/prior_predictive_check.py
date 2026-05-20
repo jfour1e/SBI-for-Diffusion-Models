@@ -1,22 +1,13 @@
-"""
-Prior Predictive Check for RT-Choice Models.
+"""Prior predictive check for RT-choice models.
 
-Draws N sessions from the prior, simulates behavioral data for each, and
-plots summary statistics.  The goal is to verify that the prior produces
-data that looks plausible BEFORE committing to training an NPE on it.
+Draws N sessions from the prior, simulates behavioral data, and writes:
+  1. prior marginal parameter distributions
+  2. pooled RT histogram (non-timeout)
+  3. per-session choice accuracy
+  4. per-session timeout rate
+  5. per-session median RT
 
-Plots produced:
-  1. Prior marginal distributions (parameter histograms)
-  2. Marginal RT distribution (pooled over all sessions x trials)
-  3. Per-session choice accuracy (proportion correct)
-  4. Per-session timeout rate
-  5. Median RT per session (spread sanity check)
-
-Usage
------
-  python prior_predictive_check.py                  # lapse model (default)
-  MODEL_NAME=base python prior_predictive_check.py
-  N_SESSIONS=200 python prior_predictive_check.py
+Environment overrides: MODEL_NAME ("base"|"lapse"), N_SESSIONS, SEED, OUTDIR.
 """
 from __future__ import annotations
 
@@ -43,10 +34,11 @@ from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, T_MAX
 
 cfg = RUN_CONFIG_PARAMS
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "lapse")      # "base" | "lapse"
-N_SESSIONS = int(os.environ.get("N_SESSIONS", "100"))   # prior draws
+MODEL_NAME = os.environ.get("MODEL_NAME", "lapse")
+N_SESSIONS = int(os.environ.get("N_SESSIONS", "100"))
 SEED       = int(os.environ.get("SEED", "42"))
 OUTDIR     = os.environ.get("OUTDIR", "prior_predictive_outputs")
+
 
 def get_model_spec(model_name: str) -> dict:
     if model_name == "base":
@@ -55,14 +47,13 @@ def get_model_spec(model_name: str) -> dict:
             "simulate_batch_fn": simulate_rt_choice_batch,
             "param_names": ["a0", "lam", "v", "B", "tau"],
         }
-    elif model_name == "lapse":
+    if model_name == "lapse":
         return {
             "prior_builder": build_prior_theta_lapse,
             "simulate_batch_fn": simulate_rt_choice_batch_lapse,
             "param_names": ["a0", "lam", "v", "B", "tau", "p_lapse"],
         }
-    else:
-        raise ValueError(f"Unknown MODEL_NAME={model_name!r}. Use 'base' or 'lapse'.")
+    raise ValueError(f"Unknown MODEL_NAME={model_name!r}. Use 'base' or 'lapse'.")
 
 
 def unpack_sessions(
@@ -72,33 +63,20 @@ def unpack_sessions(
     P: int,
     log_rt: bool,
 ) -> dict:
-    """
-    Unpack flat session tensor (N, T*(2+P)) into RT, choice, and pulse arrays.
-
-    Returns a dict with:
-      rt_all     : (N, T)    reaction times (exp-transformed if log_rt)
-      choice_all : (N, T)    0/1 choices
-      pulses_all : (N, T, P) pulse sides {-1, +1}
-      theta_all  : (N, D)
-      correct_all: (N, T)    bool - 1 if choice matches majority pulse side
-      hit_all    : (N, T)    bool - True when trial is not a timeout
-    """
     N = x_all.shape[0]
     trial_dim = 2 + P
-    x_3d = x_all.view(N, T, trial_dim)          # (N, T, trial_dim)
+    x_3d = x_all.view(N, T, trial_dim)
 
-    rt     = x_3d[:, :, 0].cpu().numpy()        # (N, T)  may be log(rt)
-    choice = x_3d[:, :, 1].cpu().numpy()        # (N, T)  0/1
-    pulses = x_3d[:, :, 2:].cpu().numpy()       # (N, T, P)
+    rt     = x_3d[:, :, 0].cpu().numpy()
+    choice = x_3d[:, :, 1].cpu().numpy()
+    pulses = x_3d[:, :, 2:].cpu().numpy()
 
     rt_real = np.exp(rt) if log_rt else rt
 
-    # Majority pulse side: sign of sum across pulses
-    pulse_sum    = pulses.sum(axis=-1)               # (N, T)
-    correct_side = (pulse_sum > 0).astype(float)     # 1 = right is correct
+    pulse_sum    = pulses.sum(axis=-1)
+    correct_side = (pulse_sum > 0).astype(float)
     correct_all  = (choice == correct_side)
 
-    # Timeout = RT stored at log(T_MAX) or T_MAX
     log_tmax = math.log(T_MAX) if log_rt else T_MAX
     hit_all  = rt < log_tmax - 1e-4
 
@@ -116,10 +94,10 @@ def unpack_sessions(
 def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> None:
     os.makedirs(outdir, exist_ok=True)
 
-    rt_real = data["rt_all"]        # (N, T)
-    correct = data["correct_all"]   # (N, T) bool
-    hit     = data["hit_all"]       # (N, T) bool
-    theta   = data["theta_all"]     # (N, D)
+    rt_real = data["rt_all"]
+    correct = data["correct_all"]
+    hit     = data["hit_all"]
+    theta   = data["theta_all"]
     N, T    = rt_real.shape
     D       = theta.shape[1]
 
@@ -223,7 +201,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
         f.write(f"Model:       {MODEL_NAME}\n")
         f.write(f"N sessions:  {N}\n")
         f.write(f"T trials:    {T}\n\n")
-        f.write("--- Data statistics ---\n")
         f.write(
             f"RT (non-timeout): mean={rt_flat.mean():.3f}s  "
             f"median={np.median(rt_flat):.3f}s  "
@@ -232,7 +209,6 @@ def plot_prior_predictive(data: dict, param_names: list[str], outdir: str) -> No
         )
         f.write(f"Choice accuracy:  mean={acc_valid.mean():.3f}  std={acc_valid.std():.3f}\n")
         f.write(f"Timeout rate:     mean={timeout_rate.mean():.3f}  max={timeout_rate.max():.3f}\n")
-        f.write("\n--- Prior parameter statistics ---\n")
         for d, name in enumerate(param_names):
             col = theta[:, d]
             f.write(
@@ -275,7 +251,6 @@ def main() -> None:
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=SEED,
     )
-    print("Simulation complete.")
 
     data = unpack_sessions(x_all, theta_all, T, P, log_rt=bool(cfg.LOG_RT_MANUALLY))
 
@@ -290,7 +265,7 @@ def main() -> None:
 
     print(f"\nPlotting to {OUTDIR}/ ...")
     plot_prior_predictive(data, param_names, OUTDIR)
-    print("\nDone.")
+
 
 if __name__ == "__main__":
     main()

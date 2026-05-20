@@ -4,15 +4,14 @@ import pytest
 import torch
 import numpy as np
 
-# Constants from run_config.py 
 T_MAX = 10.0
 PULSE_INTERVAL = 0.25
-P_MAX = int(T_MAX / PULSE_INTERVAL)  # 40
+P_MAX = int(T_MAX / PULSE_INTERVAL)
 DT_INTERNAL = 0.01
 MU_SENSORY = 1.0
 P_SUCCESS = 0.7
 NUM_TRIALS = 256
-TRIAL_DIM = 2 + P_MAX 
+TRIAL_DIM = 2 + P_MAX
 
 
 @pytest.fixture

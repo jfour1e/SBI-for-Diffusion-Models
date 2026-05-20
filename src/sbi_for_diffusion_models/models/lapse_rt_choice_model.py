@@ -10,6 +10,7 @@ cfg = RUN_CONFIG_PARAMS
 
 from .rt_choice_model import max_num_pulses, as_pulse_tensor, generate_pulses_torch, _ou_transition_params
 
+
 def _run_fine_ou_loop_lapse(
     a0_frac: Tensor,
     lam: Tensor,
@@ -23,10 +24,6 @@ def _run_fine_ou_loop_lapse(
     pulse_interval: float,
     T_MAX: float,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """
-    Simulate non-lapse pulse-accumulation trials with leaky OU dynamics and absorbing bounds.
-    Returns hit indicators, binary choices, and decision times before adding tau.
-    """
     device = a0_frac.device
     dtype = a0_frac.dtype
     N = a0_frac.shape[0]
@@ -34,13 +31,11 @@ def _run_fine_ou_loop_lapse(
     delta = float(pulse_interval)
     dt0 = float(dt_internal)
 
-    # force an integer number of internal steps per pulse interval
     steps_per_pulse = max(1, int(round(delta / dt0)))
     dt = delta / steps_per_pulse
 
     P_max = s.shape[1]
 
-    # available decision time after non-decision delay tau
     max_dec_time = (float(T_MAX) - tau).clamp_min(0.0)
     step_limit = torch.floor(max_dec_time / dt).to(torch.int64)
     max_steps = int(step_limit.max().item()) if N > 0 else 0
@@ -57,8 +52,7 @@ def _run_fine_ou_loop_lapse(
         if not torch.any(active):
             break
 
-        # pulse kick at pulse boundaries — pulse k fires at t=(k+1)*delta,
-        # matching base model convention and mask_unperceived_pulses.
+        # Pulse k fires at t = (k+1)*delta, matching mask_unperceived_pulses.
         if step > 0 and step % steps_per_pulse == 0:
             k = step // steps_per_pulse - 1
             if k < P_max:
@@ -77,7 +71,7 @@ def _run_fine_ou_loop_lapse(
         if not torch.any(active):
             continue
 
-        # OU evolution for one internal step (restores toward B/2, not 0)
+        # OU restores toward B/2, not 0.
         eps = torch.randn((N,), device=device, dtype=dtype)
         a = torch.where(active, a * decay + (B / 2.0) * (1.0 - decay) + noise_std * eps, a)
 
@@ -92,6 +86,7 @@ def _run_fine_ou_loop_lapse(
 
     return hit, choice, decision_time
 
+
 def _sample_lapse_observations(
     n_trials: int,
     *,
@@ -100,7 +95,6 @@ def _sample_lapse_observations(
     generator: Optional[torch.Generator] = None,
     rt_max: Optional[float] = None,
 ) -> Tuple[Tensor, Tensor]:
-    """Sample lapse trials with uniform RT on (0, T_MAX-eps) and random choice with p=0.5."""
     if n_trials == 0:
         return (
             torch.empty((0,), device=device, dtype=dtype),
@@ -128,19 +122,13 @@ def simulate_rt_choice_batch_lapse(
     *,
     mu_sensory: float,
     pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
-    p_success: float = cfg.P_SUCCESS,
+    p_success: Union[float, Tensor] = cfg.P_SUCCESS,
     pulse_generator: Optional[torch.Generator] = None,
 ) -> Tuple[Tensor, Tensor, Tensor]:
-    """
-    Simulate a batch of pulse-based RT/choice trials with a lapse mode.
+    """Simulate pulse-based RT/choice trials with a lapse mode.
 
-    theta columns:
-      [a0_frac, lam, v, B, tau, p_lapse]
-
-    Returns:
-      x:   (N, 2) with columns [rt, choice]
-      hit: (N,) bool; lapse trials are marked hit=True so they are never retried
-      s:   (N, P_max) pulse sequences shown on each trial
+    theta columns: [a0_frac, lam, v, B, tau, p_lapse].
+    Lapse trials are marked hit=True so they are never retried.
     """
     if theta.ndim == 1:
         theta = theta.view(1, -1)
@@ -162,12 +150,11 @@ def simulate_rt_choice_batch_lapse(
     P_max = max_num_pulses()
     delta = float(PULSE_INTERVAL)
 
-    # pulse matrix in {-1, +1}
     if pulse_sides is None:
         s = generate_pulses_torch(
             n_trials=N,
             n_pulses=P_max,
-            p_success=float(p_success),
+            p_success=p_success,
             device=device,
             dtype=dtype,
             generator=pulse_generator,
@@ -184,7 +171,6 @@ def simulate_rt_choice_batch_lapse(
 
     dt_internal = float(getattr(cfg, "DT_INTERNAL", 0.01))
 
-    # sample trialwise lapse indicators
     is_lapse = torch.rand(
         (N,), device=device, generator=pulse_generator, dtype=dtype
     ) < p_lapse
@@ -193,7 +179,6 @@ def simulate_rt_choice_batch_lapse(
     choice = torch.empty((N,), device=device, dtype=torch.int64)
     hit = torch.empty((N,), device=device, dtype=torch.bool)
 
-    # non-lapse trials: original accumulator dynamics
     non_lapse_idx = (~is_lapse).nonzero(as_tuple=False).squeeze(1)
     if non_lapse_idx.numel() > 0:
         idx = non_lapse_idx
@@ -216,7 +201,6 @@ def simulate_rt_choice_batch_lapse(
         choice[idx] = choice_nl
         hit[idx] = hit_nl
 
-    # lapse trials: random RT and random choice
     lapse_idx = is_lapse.nonzero(as_tuple=False).squeeze(1)
     if lapse_idx.numel() > 0:
         idx = lapse_idx

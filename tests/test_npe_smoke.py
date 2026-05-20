@@ -1,6 +1,4 @@
-"""
-NPE training smoke tests.
-"""
+"""NPE training smoke tests."""
 from __future__ import annotations
 
 import os
@@ -30,22 +28,20 @@ P_MAX = max_num_pulses()
 TRIAL_DIM = 2 + P_MAX
 
 
-# Small RunConfig that keeps the smoke test fast
 @dataclass(frozen=True)
 class _TinyConfig:
+    """Minimal config so smoke tests run in seconds."""
     MU_SENSORY: float = 1.0
     P_SUCCESS: float = 0.7
-    NUM_TRIALS_OBS: int = 16        
+    P_SUCCESS_TRAIN_VALUES: tuple[float, ...] = (1.0, 0.8, 0.7, 0.6)
+    NUM_TRIALS_OBS: int = 16
     LOG_RT_MANUALLY: bool = True
-    NPE_RESERVOIR_SIZE: int = 500
-    NPE_RESERVOIR_REFRESH_FRAC: float = 0.0
-    NPE_NUM_SESSIONS: int = 4
     NPE_TRAIN_BATCH_SIZE: int = 4
     NPE_HIDDEN_FEATURES: int = 32
     NPE_NUM_TRANSFORMS: int = 2
     NPE_NUM_BINS: int = 4
-    NPE_SESSIONS_PER_STEP: int = 4    
-    NPE_NUM_STEPS: int = 5            # 
+    NPE_SESSIONS_PER_STEP: int = 4
+    NPE_NUM_STEPS: int = 5
     NPE_LR: float = 1e-3
 
     NPE_TRIAL_NET_HIDDEN: int = 32
@@ -56,16 +52,16 @@ class _TinyConfig:
     NPE_POST_AGG_LAYERS: int = 1
     NPE_EMBEDDING_OUTPUT_DIM: int = 16
 
-    # Inference
     NPE_POSTERIOR_SAMPLES: int = 50
 
     NPE_PATIENCE: int = 9999
     NPE_MIN_DELTA: float = 0.0
     NPE_EMA_BETA: float = 0.98
 
+
 TINY_CFG = _TinyConfig()
 
-# Base model (5 params)
+
 class TestNPESmokeBase:
 
     @pytest.fixture(autouse=True)
@@ -77,7 +73,6 @@ class TestNPESmokeBase:
         self.theta_dim = 5
 
     def test_training_loop_runs(self):
-        """train_npe_session should complete without error."""
         density_est, posterior = train_npe_session(
             self.cfg,
             self.prior,
@@ -89,7 +84,6 @@ class TestNPESmokeBase:
         assert posterior is not None
 
     def test_loss_is_finite(self):
-        """Every loss value during training should be finite."""
         density_est, _ = train_npe_session(
             self.cfg,
             self.prior,
@@ -97,7 +91,6 @@ class TestNPESmokeBase:
             device=self.device,
             seed=0,
         )
-        # Run one more forward pass to spot-check
         T = int(self.cfg.NUM_TRIALS_OBS)
         theta_b, x_b = simulate_training_sessions(
             self.prior,
@@ -167,10 +160,9 @@ class TestNPESmokeBase:
         samples = posterior.sample(
             (20,), x=x_o, show_progress_bars=False,
         ).detach().cpu()
-        assert torch.all(torch.isfinite(samples)), "Non-finite posterior samples"
+        assert torch.all(torch.isfinite(samples))
 
     def test_checkpoint_roundtrip(self):
-        """Save and reload weights — the density estimator should produce identical loss."""
         density_est, _ = train_npe_session(
             self.cfg,
             self.prior,
@@ -186,7 +178,6 @@ class TestNPESmokeBase:
             )
             checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
-        # Rebuild a fresh estimator with the same architecture
         T = int(self.cfg.NUM_TRIALS_OBS)
         embedding = _build_npe_embedding_net(self.cfg, T=T, P=P_MAX)
         builder = _build_npe_estimator_builder(self.cfg, embedding)
@@ -201,7 +192,6 @@ class TestNPESmokeBase:
         est_reloaded.eval()
         density_est.eval()
 
-        # Both should produce the same loss on identical data
         with torch.no_grad():
             loss_orig = density_est.loss(theta_d, condition=x_d).mean()
             loss_reload = est_reloaded.loss(theta_d, condition=x_d).mean()
@@ -210,7 +200,6 @@ class TestNPESmokeBase:
         )
 
 
-# Lapse model (6 params) smoke test
 class TestNPESmokeLapse:
 
     @pytest.fixture(autouse=True)
@@ -286,12 +275,8 @@ class TestNPESmokeLapse:
         assert torch.all(torch.isfinite(losses))
 
 
-#  Embedding - density estimator compatibility
 class TestEmbeddingEstimatorCompat:
-    """
-    Verify the embedding net and the NSF density estimator agree on
-    dimensions so that no shape mismatch occurs at the junction.
-    """
+    """The embedding net and the NSF density estimator must agree on dimensions."""
 
     def test_dummy_forward_pass(self):
         cfg = TINY_CFG
