@@ -19,10 +19,12 @@ torch.distributions.Distribution.set_default_validate_args(False)
 from sbi.analysis import pairplot
 from sbi.inference.posteriors import DirectPosterior
 
-from sbi_for_diffusion_models.priors import build_prior_theta, build_prior_theta_lapse
-from sbi_for_diffusion_models.models.rt_choice_model import simulate_rt_choice_batch, max_num_pulses
-from sbi_for_diffusion_models.models.lapse_rt_choice_model import simulate_rt_choice_batch_lapse
-from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
+from sbi_for_diffusion_models.model_specs import select_model
+from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
+from sbi_for_diffusion_models.data_simulator import (
+    simulate_training_sessions,
+    simulate_training_sessions_ar,
+)
 from sbi_for_diffusion_models.mnpe import load_npe
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS
 
@@ -37,22 +39,7 @@ OUTDIR      = os.environ.get("OUTDIR",      "posterior_update_outputs")
 MODEL_DIR   = os.path.expanduser(os.environ.get("MODEL_DIR", "~/models"))
 
 
-def get_spec(model_name: str) -> dict:
-    if model_name == "base":
-        return dict(
-            prior_builder=build_prior_theta,
-            simulate_batch_fn=simulate_rt_choice_batch,
-            param_names=["a0", "lam", "v", "B", "tau"],
-            model_file="npe_rt_choice_base.pt",
-        )
-    if model_name == "lapse":
-        return dict(
-            prior_builder=build_prior_theta_lapse,
-            simulate_batch_fn=simulate_rt_choice_batch_lapse,
-            param_names=["a0", "lam", "v", "B", "tau", "p_lapse"],
-            model_file="npe_rt_choice_lapse.pt",
-        )
-    raise ValueError(model_name)
+MODEL_FILE = os.environ.get("MODEL_FILE", f"npe_rt_choice_{MODEL_NAME}.pt")
 
 
 def main() -> None:
@@ -63,18 +50,23 @@ def main() -> None:
     dev    = torch.device(device)
     print(f"Model: {MODEL_NAME}  |  N_test: {N_TEST}  |  device: {device}")
 
-    spec              = get_spec(MODEL_NAME)
-    prior_theta       = spec["prior_builder"]()
-    simulate_batch_fn = spec["simulate_batch_fn"]
-    param_names       = spec["param_names"]
-    D                 = len(param_names)
+    simulate_batch_fn, prior_theta, param_names, _model_tag, autoregressive = select_model(MODEL_NAME)
+    param_names = list(param_names)
+    D = len(param_names)
 
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
 
-    model_path = os.path.join(MODEL_DIR, spec["model_file"])
-    print(f"Loading model from {model_path} ...")
+    model_path = os.path.join(MODEL_DIR, MODEL_FILE)
+    print(f"Loading model from {model_path} (ar={autoregressive}) ...")
     de, saved_cfg = load_npe(model_path, prior_theta=prior_theta, device=device)
+    saved_ar = bool(getattr(saved_cfg, "AUTOREGRESSIVE", False))
+    if saved_ar != autoregressive:
+        raise RuntimeError(
+            f"MODEL_NAME={MODEL_NAME!r} implies ar={autoregressive}, "
+            f"but checkpoint was trained with AUTOREGRESSIVE={saved_ar}."
+        )
+    session_fn = simulate_training_sessions_ar if autoregressive else simulate_training_sessions
 
     posterior = DirectPosterior(
         posterior_estimator=de,
@@ -102,7 +94,7 @@ def main() -> None:
             prior_theta.sample((1,)), device=dev, dtype=torch.float32
         ).reshape(-1)
 
-        _, x_flat = simulate_training_sessions(
+        _, x_flat = session_fn(
             prior_theta=prior_theta,
             num_sessions=1,
             num_trials=T,

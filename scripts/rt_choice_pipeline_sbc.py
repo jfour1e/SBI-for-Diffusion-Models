@@ -9,32 +9,11 @@ torch.distributions.Distribution.set_default_validate_args(False)
 
 from sbi.inference.posteriors import DirectPosterior
 
-from sbi_for_diffusion_models.priors import build_prior_theta, build_prior_theta_lapse
-from sbi_for_diffusion_models.models.rt_choice_model import simulate_rt_choice_batch
-from sbi_for_diffusion_models.models.lapse_rt_choice_model import simulate_rt_choice_batch_lapse
+from sbi_for_diffusion_models.model_specs import select_model
 from sbi_for_diffusion_models.mnpe import load_npe, run_sbc_npe
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "lapse")
-
-
-def get_model_spec(model_name: str):
-    if model_name == "base":
-        return {
-            "prior_builder": build_prior_theta,
-            "simulate_batch_fn": simulate_rt_choice_batch,
-            "param_names": ("a0", "lam", "v", "B", "tau"),
-            "model_filename": "npe_rt_choice_base.pt",
-            "outdir_default": "sbc_outputs_base",
-        }
-    if model_name == "lapse":
-        return {
-            "prior_builder": build_prior_theta_lapse,
-            "simulate_batch_fn": simulate_rt_choice_batch_lapse,
-            "param_names": ("a0", "lam", "v", "B", "tau", "p_lapse"),
-            "model_filename": "npe_rt_choice_lapse.pt",
-            "outdir_default": "sbc_outputs_lapse",
-        }
-    raise ValueError(f"Unknown MODEL_NAME={model_name!r}. Use 'base' or 'lapse'.")
+MODEL_FILE = os.environ.get("MODEL_FILE", f"npe_rt_choice_{MODEL_NAME}.pt")
 
 
 def main():
@@ -44,22 +23,25 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("device:", device)
 
-    spec = get_model_spec(MODEL_NAME)
-    prior_theta = spec["prior_builder"]()
-    simulate_batch_fn = spec["simulate_batch_fn"]
-    param_names = spec["param_names"]
+    simulate_batch_fn, prior_theta, param_names, _model_tag, autoregressive = select_model(MODEL_NAME)
 
     if hasattr(prior_theta, "to"):
         prior_theta.to(torch.device(device))
 
-    model_path = os.path.expanduser(os.path.join("~/models", spec["model_filename"]))
-    print(f"Loading model from {model_path} ...")
+    model_path = os.path.expanduser(os.path.join("~/models", MODEL_FILE))
+    print(f"Loading model from {model_path} (ar={autoregressive}) ...")
 
     density_estimator, saved_cfg = load_npe(
         model_path,
         prior_theta=prior_theta,
         device=device,
     )
+    saved_ar = bool(getattr(saved_cfg, "AUTOREGRESSIVE", False))
+    if saved_ar != autoregressive:
+        raise RuntimeError(
+            f"MODEL_NAME={MODEL_NAME!r} implies ar={autoregressive}, "
+            f"but checkpoint was trained with AUTOREGRESSIVE={saved_ar}."
+        )
 
     posterior = DirectPosterior(
         posterior_estimator=density_estimator,
@@ -67,7 +49,7 @@ def main():
         device=device,
     )
 
-    outdir = os.environ.get("OUTDIR", spec["outdir_default"])
+    outdir = os.environ.get("OUTDIR", f"sbc_outputs_{MODEL_NAME}")
 
     run_sbc_npe(
         cfg=saved_cfg,

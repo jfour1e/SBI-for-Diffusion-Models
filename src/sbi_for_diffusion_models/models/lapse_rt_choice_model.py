@@ -8,7 +8,14 @@ from torch import Tensor
 from ..run_config import RUN_CONFIG_PARAMS, T_MAX, PULSE_INTERVAL
 cfg = RUN_CONFIG_PARAMS
 
-from .rt_choice_model import max_num_pulses, as_pulse_tensor, generate_pulses_torch, _ou_transition_params
+from .rt_choice_model import (
+    max_num_pulses,
+    as_pulse_tensor,
+    generate_pulses_torch,
+    _ou_transition_params,
+    _insert_zero_lam,
+    apply_ar_bias_to_a0,
+)
 
 
 def _run_fine_ou_loop_lapse(
@@ -219,3 +226,98 @@ def simulate_rt_choice_batch_lapse(
 
     x = torch.stack([rt, choice.to(dtype)], dim=-1)
     return x, hit, s
+
+
+def simulate_rt_choice_batch_lapse_noleak(
+    theta: Tensor,
+    *,
+    mu_sensory: float,
+    pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
+    p_success: Union[float, Tensor] = cfg.P_SUCCESS,
+    pulse_generator: Optional[torch.Generator] = None,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """No-leak variant: theta = [a0, v, B, tau, p_lapse]. Equivalent to lam=0."""
+    if theta.ndim == 1:
+        theta = theta.view(1, -1)
+    if theta.shape[-1] != 5:
+        raise ValueError(f"Expected theta shape (N,5) or (5,), got {tuple(theta.shape)}")
+    return simulate_rt_choice_batch_lapse(
+        _insert_zero_lam(theta),
+        mu_sensory=mu_sensory,
+        pulse_sides=pulse_sides,
+        p_success=p_success,
+        pulse_generator=pulse_generator,
+    )
+
+
+def simulate_rt_choice_batch_lapse_ar(
+    theta: Tensor,
+    *,
+    mu_sensory: float,
+    pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
+    p_success: Union[float, Tensor] = cfg.P_SUCCESS,
+    pulse_generator: Optional[torch.Generator] = None,
+    prev_choice_signed: Optional[Tensor] = None,
+    prev_outcome_signed: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """Lapse + AR: theta = [a0, lam, v, B, tau, p_lapse, w_corr, w_err]."""
+    if theta.ndim == 1:
+        theta = theta.view(1, -1)
+    if theta.shape[-1] != 8:
+        raise ValueError(f"Expected theta shape (N,8) or (8,), got {tuple(theta.shape)}")
+
+    device = theta.device
+    dtype = torch.float32
+    theta = theta.to(dtype=dtype)
+    N = theta.shape[0]
+
+    if prev_choice_signed is None:
+        prev_choice_signed = torch.zeros((N,), device=device, dtype=dtype)
+    if prev_outcome_signed is None:
+        prev_outcome_signed = torch.zeros((N,), device=device, dtype=dtype)
+
+    a0_eff = apply_ar_bias_to_a0(
+        theta[:, 0].clamp(0.0, 1.0),
+        theta[:, 6],
+        theta[:, 7],
+        prev_choice_signed.to(device=device, dtype=dtype),
+        prev_outcome_signed.to(device=device, dtype=dtype),
+    )
+
+    theta_inner = torch.stack(
+        [a0_eff, theta[:, 1], theta[:, 2], theta[:, 3], theta[:, 4], theta[:, 5]],
+        dim=1,
+    )
+    return simulate_rt_choice_batch_lapse(
+        theta_inner,
+        mu_sensory=mu_sensory,
+        pulse_sides=pulse_sides,
+        p_success=p_success,
+        pulse_generator=pulse_generator,
+    )
+
+
+def simulate_rt_choice_batch_lapse_noleak_ar(
+    theta: Tensor,
+    *,
+    mu_sensory: float,
+    pulse_sides: Optional[Union[Tensor, np.ndarray]] = None,
+    p_success: Union[float, Tensor] = cfg.P_SUCCESS,
+    pulse_generator: Optional[torch.Generator] = None,
+    prev_choice_signed: Optional[Tensor] = None,
+    prev_outcome_signed: Optional[Tensor] = None,
+) -> Tuple[Tensor, Tensor, Tensor]:
+    """No-leak + lapse + AR: theta = [a0, v, B, tau, p_lapse, w_corr, w_err]."""
+    if theta.ndim == 1:
+        theta = theta.view(1, -1)
+    if theta.shape[-1] != 7:
+        raise ValueError(f"Expected theta shape (N,7) or (7,), got {tuple(theta.shape)}")
+    return simulate_rt_choice_batch_lapse_ar(
+        _insert_zero_lam(theta),
+        mu_sensory=mu_sensory,
+        pulse_sides=pulse_sides,
+        p_success=p_success,
+        pulse_generator=pulse_generator,
+        prev_choice_signed=prev_choice_signed,
+        prev_outcome_signed=prev_outcome_signed,
+    )

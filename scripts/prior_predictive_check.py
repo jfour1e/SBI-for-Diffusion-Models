@@ -21,15 +21,13 @@ import matplotlib.pyplot as plt
 
 torch.distributions.Distribution.set_default_validate_args(False)
 
-from sbi_for_diffusion_models.priors import build_prior_theta, build_prior_theta_lapse
-from sbi_for_diffusion_models.models.rt_choice_model import (
-    simulate_rt_choice_batch,
-    max_num_pulses,
+from sbi_for_diffusion_models.model_specs import select_model
+from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
+from sbi_for_diffusion_models.data_simulator import (
+    simulate_training_sessions,
+    simulate_training_sessions_ar,
+    trial_feature_dim,
 )
-from sbi_for_diffusion_models.models.lapse_rt_choice_model import (
-    simulate_rt_choice_batch_lapse,
-)
-from sbi_for_diffusion_models.data_simulator import simulate_training_sessions
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, T_MAX
 
 cfg = RUN_CONFIG_PARAMS
@@ -40,36 +38,22 @@ SEED       = int(os.environ.get("SEED", "42"))
 OUTDIR     = os.environ.get("OUTDIR", "prior_predictive_outputs")
 
 
-def get_model_spec(model_name: str) -> dict:
-    if model_name == "base":
-        return {
-            "prior_builder": build_prior_theta,
-            "simulate_batch_fn": simulate_rt_choice_batch,
-            "param_names": ["a0", "lam", "v", "B", "tau"],
-        }
-    if model_name == "lapse":
-        return {
-            "prior_builder": build_prior_theta_lapse,
-            "simulate_batch_fn": simulate_rt_choice_batch_lapse,
-            "param_names": ["a0", "lam", "v", "B", "tau", "p_lapse"],
-        }
-    raise ValueError(f"Unknown MODEL_NAME={model_name!r}. Use 'base' or 'lapse'.")
-
-
 def unpack_sessions(
     x_all: torch.Tensor,
     theta_all: torch.Tensor,
     T: int,
     P: int,
     log_rt: bool,
+    autoregressive: bool = False,
 ) -> dict:
     N = x_all.shape[0]
-    trial_dim = 2 + P
+    trial_dim = trial_feature_dim(P, ar=autoregressive)
     x_3d = x_all.view(N, T, trial_dim)
 
+    pulse_start = 4 if autoregressive else 2
     rt     = x_3d[:, :, 0].cpu().numpy()
     choice = x_3d[:, :, 1].cpu().numpy()
-    pulses = x_3d[:, :, 2:].cpu().numpy()
+    pulses = x_3d[:, :, pulse_start:].cpu().numpy()
 
     rt_real = np.exp(rt) if log_rt else rt
 
@@ -226,33 +210,39 @@ def main() -> None:
     dev    = torch.device(device)
     print(f"Model: {MODEL_NAME}  |  N_sessions: {N_SESSIONS}  |  device: {device}")
 
-    spec              = get_model_spec(MODEL_NAME)
-    prior_theta       = spec["prior_builder"]()
-    simulate_batch_fn = spec["simulate_batch_fn"]
-    param_names       = spec["param_names"]
+    simulate_batch_fn, prior_theta, param_names, _model_tag, autoregressive = select_model(MODEL_NAME)
+    param_names = list(param_names)
 
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
 
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
-    print(f"P={P}, T={T}")
+    print(f"P={P}, T={T}, ar={autoregressive}")
+
+    session_fn = simulate_training_sessions_ar if autoregressive else simulate_training_sessions
 
     print(f"\nSimulating {N_SESSIONS} sessions from prior ...")
-    theta_all, x_all = simulate_training_sessions(
+    theta_all, x_all = session_fn(
         prior_theta=prior_theta,
         num_sessions=N_SESSIONS,
         num_trials=T,
         simulate_batch_fn=simulate_batch_fn,
         device=dev,
         mu_sensory=float(cfg.MU_SENSORY),
-        p_success=float(cfg.P_SUCCESS),
+        # Sample p_success per session from the mixed training values (matches
+        # how the corpus is generated), rather than a single fixed condition.
+        p_success=cfg.P_SUCCESS_TRAIN_VALUES,
         P=P,
         log_rt=bool(cfg.LOG_RT_MANUALLY),
         seed=SEED,
     )
 
-    data = unpack_sessions(x_all, theta_all, T, P, log_rt=bool(cfg.LOG_RT_MANUALLY))
+    data = unpack_sessions(
+        x_all, theta_all, T, P,
+        log_rt=bool(cfg.LOG_RT_MANUALLY),
+        autoregressive=autoregressive,
+    )
 
     rt_flat = data["rt_all"][data["hit_all"]]
     print(

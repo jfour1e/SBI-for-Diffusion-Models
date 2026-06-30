@@ -13,17 +13,23 @@ from sbi.inference.posteriors import DirectPosterior
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
 from sbi_for_diffusion_models.data_simulator import (
     simulate_training_sessions,
+    simulate_training_sessions_ar,
     trial_feature_dim,
+    load_corpus,
 )
 from sbi_for_diffusion_models.Embeddings import PermutationInvariantEmbedding
+
+
+def _pick_session_simulator(autoregressive: bool) -> Callable:
+    return simulate_training_sessions_ar if autoregressive else simulate_training_sessions
 
 
 def _p_success_training_values(cfg):
     return tuple(getattr(cfg, "P_SUCCESS_TRAIN_VALUES", (float(cfg.P_SUCCESS),)))
 
 
-def _build_npe_embedding_net(cfg, *, T: int, P: int) -> torch.nn.Module:
-    trial_dim = trial_feature_dim(P)
+def _build_npe_embedding_net(cfg, *, T: int, P: int, autoregressive: bool = False) -> torch.nn.Module:
+    trial_dim = trial_feature_dim(P, ar=autoregressive)
 
     return PermutationInvariantEmbedding(
         num_trials=T,
@@ -50,8 +56,9 @@ def _build_npe_estimator_builder(cfg, embedding_net):
     )
 
 
-def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev: torch.device, seed: int, T: int, P: int):
-    return simulate_training_sessions(
+def _simulate_dummy_batch(cfg, prior_theta, *, simulate_batch_fn: Callable, dev: torch.device, seed: int, T: int, P: int, autoregressive: bool = False):
+    session_fn = _pick_session_simulator(autoregressive)
+    return session_fn(
         prior_theta,
         num_sessions=2,
         num_trials=T,
@@ -76,6 +83,7 @@ def train_npe_session(
     seed_offset: int = 0,
     checkpoint_path: Optional[str] = None,
     checkpoint_every: int = 0,
+    autoregressive: bool = False,
 ):
     dev = torch.device(device)
     torch.manual_seed(int(seed))
@@ -83,8 +91,9 @@ def train_npe_session(
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
 
-    embedding_net = _build_npe_embedding_net(cfg, T=T, P=P).to(dev)
+    embedding_net = _build_npe_embedding_net(cfg, T=T, P=P, autoregressive=autoregressive).to(dev)
     est_builder = _build_npe_estimator_builder(cfg, embedding_net)
+    session_fn = _pick_session_simulator(autoregressive)
 
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
@@ -97,6 +106,7 @@ def train_npe_session(
         seed=int(seed),
         T=T,
         P=P,
+        autoregressive=autoregressive,
     )
     theta_dummy = theta_dummy.to(dev, dtype=torch.float32)
     x_dummy = x_dummy.to(dev, dtype=torch.float32)
@@ -119,7 +129,7 @@ def train_npe_session(
     theta_val = x_val = None
     if use_val:
         print(f"[NPE] Building held-out val set: {val_sessions} sessions ...")
-        theta_val, x_val = simulate_training_sessions(
+        theta_val, x_val = session_fn(
             prior_theta,
             num_sessions=val_sessions,
             num_trials=T,
@@ -180,7 +190,7 @@ def train_npe_session(
     for step in range(num_steps):
 
         with torch.no_grad():
-            theta_b, x_b = simulate_training_sessions(
+            theta_b, x_b = session_fn(
                 prior_theta,
                 num_sessions=sess_per_step,
                 num_trials=T,
@@ -266,6 +276,169 @@ def train_npe_session(
     return density_estimator, posterior
 
 
+def train_npe_session_from_corpus(
+    cfg,
+    prior_theta,
+    *,
+    corpus_train_dir: str,
+    corpus_val_dir: Optional[str] = None,
+    device: str = "cpu",
+    seed: int = 0,
+    resume_from: Optional[str] = None,
+    checkpoint_path: Optional[str] = None,
+    checkpoint_every: int = 0,
+    autoregressive: bool = False,
+):
+    """Train NPE from a pre-simulated corpus on disk.
+
+    `corpus_train_dir` and (optional) `corpus_val_dir` are directories of chunk
+    `.pt` files written by `pre_simulate.py`. All chunks must share theta_dim,
+    x_dim, and autoregressive flag.
+    """
+    dev = torch.device(device)
+    torch.manual_seed(int(seed))
+
+    P = max_num_pulses()
+    T = int(cfg.NUM_TRIALS_OBS)
+
+    embedding_net = _build_npe_embedding_net(cfg, T=T, P=P, autoregressive=autoregressive).to(dev)
+    est_builder = _build_npe_estimator_builder(cfg, embedding_net)
+
+    if hasattr(prior_theta, "to"):
+        prior_theta.to(dev)
+
+    print(f"[NPE] loading train corpus from {corpus_train_dir} ...")
+    theta_train, x_train = load_corpus(corpus_train_dir, autoregressive=autoregressive, pattern="chunk_*.pt")
+    theta_train = theta_train.to(dev, dtype=torch.float32)
+    x_train = x_train.to(dev, dtype=torch.float32)
+
+    N_train = theta_train.shape[0]
+    print(f"[NPE] train corpus N={N_train}, theta_dim={theta_train.shape[1]}, x_dim={x_train.shape[1]}")
+
+    theta_val = x_val = None
+    use_val = False
+    if corpus_val_dir is not None and os.path.isdir(corpus_val_dir):
+        print(f"[NPE] loading val corpus from {corpus_val_dir} ...")
+        theta_val, x_val = load_corpus(corpus_val_dir, autoregressive=autoregressive, pattern="val_*.pt")
+        theta_val = theta_val.to(dev, dtype=torch.float32)
+        x_val = x_val.to(dev, dtype=torch.float32)
+        use_val = True
+
+    density_estimator = est_builder(theta_train[:2], x_train[:2]).to(dev)
+
+    if resume_from is not None:
+        checkpoint = torch.load(resume_from, map_location=dev, weights_only=False)
+        density_estimator.load_state_dict(checkpoint["state_dict"], strict=True)
+        print(f"[NPE] Resumed weights from {resume_from}")
+
+    val_every = int(getattr(cfg, "NPE_VAL_EVERY", 100))
+    val_patience = int(getattr(cfg, "NPE_VAL_PATIENCE", 20))
+    val_min_delta = float(getattr(cfg, "NPE_VAL_MIN_DELTA", 1e-3))
+    val_batch = int(getattr(cfg, "NPE_VAL_BATCH", 512))
+
+    density_estimator.train()
+
+    lr = float(getattr(cfg, "NPE_LR", 5e-4))
+    optimizer = torch.optim.AdamW(density_estimator.parameters(), lr=lr)
+
+    sess_per_step = int(getattr(cfg, "NPE_SESSIONS_PER_STEP", 8))
+    num_steps = int(getattr(cfg, "NPE_NUM_STEPS", 10_000))
+
+    print(
+        f"[NPE] device={dev}, sess_per_step={sess_per_step}, "
+        f"num_steps={num_steps}, lr={lr}, val={'on' if use_val else 'off'}"
+    )
+
+    ema_beta = float(getattr(cfg, "NPE_EMA_BETA", 0.98))
+    ema = None
+
+    best_val = float("inf")
+    bad_val = 0
+    best_state_dict = None
+
+    sample_gen = torch.Generator(device=dev)
+    sample_gen.manual_seed(int(seed) + 1)
+
+    def _compute_val_loss() -> float:
+        density_estimator.eval()
+        with torch.no_grad():
+            n = theta_val.shape[0]
+            total = 0.0
+            count = 0
+            for s in range(0, n, val_batch):
+                e = min(n, s + val_batch)
+                losses = density_estimator.loss(theta_val[s:e], condition=x_val[s:e])
+                total += float(losses.sum().item())
+                count += int(e - s)
+        density_estimator.train()
+        return total / max(1, count)
+
+    for step in range(num_steps):
+        idx = torch.randint(0, N_train, (sess_per_step,), device=dev, generator=sample_gen)
+        theta_b = theta_train.index_select(0, idx)
+        x_b = x_train.index_select(0, idx)
+
+        optimizer.zero_grad(set_to_none=True)
+        losses = density_estimator.loss(theta_b, condition=x_b)
+        loss = losses.mean()
+        loss.backward()
+        optimizer.step()
+
+        li = float(loss.item())
+        ema = li if ema is None else ema_beta * ema + (1.0 - ema_beta) * li
+
+        if (step + 1) % 50 == 0:
+            print(f"step {step + 1}: loss={li:.4f} ema={ema:.4f}")
+
+        if use_val and (step + 1) % val_every == 0:
+            val_loss = _compute_val_loss()
+            improved = val_loss < best_val - val_min_delta
+            marker = "*" if improved else " "
+            print(
+                f"[VAL] step {step + 1}: val_loss={val_loss:.4f} "
+                f"(best={best_val:.4f}) {marker}"
+            )
+            if improved:
+                best_val = val_loss
+                bad_val = 0
+                best_state_dict = {
+                    k: v.detach().clone() for k, v in density_estimator.state_dict().items()
+                }
+            else:
+                bad_val += 1
+                if bad_val >= val_patience:
+                    print(
+                        f"[NPE] early stop at step {step + 1} "
+                        f"(no val improvement for {val_patience} evals)"
+                    )
+                    break
+
+        if (
+            checkpoint_path is not None
+            and checkpoint_every > 0
+            and (step + 1) % int(checkpoint_every) == 0
+        ):
+            os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
+            torch.save(
+                {
+                    "state_dict": density_estimator.state_dict(),
+                    "config": cfg,
+                    "step": step + 1,
+                    "best_val": best_val if use_val else None,
+                },
+                checkpoint_path,
+            )
+            print(f"[NPE] checkpoint saved at step {step + 1}: {checkpoint_path}")
+
+    if use_val and best_state_dict is not None:
+        density_estimator.load_state_dict(best_state_dict, strict=True)
+        print(f"[NPE] Restored best-val weights (val_loss={best_val:.4f})")
+
+    density_estimator.eval()
+    posterior = DirectPosterior(density_estimator, prior_theta)
+    return density_estimator, posterior
+
+
 def run_inference_npe(cfg, inference_obj, density_estimator, x_o_flat, prior_theta):
     posterior = inference_obj.build_posterior(
         density_estimator=density_estimator,
@@ -301,7 +474,8 @@ def load_npe(
 
     P = max_num_pulses()
     T = int(saved_cfg.NUM_TRIALS_OBS)
-    trial_dim = trial_feature_dim(P)
+    ar = bool(getattr(saved_cfg, "AUTOREGRESSIVE", False))
+    trial_dim = trial_feature_dim(P, ar=ar)
     x_dim = T * trial_dim
 
     theta_probe = torch.as_tensor(
@@ -311,7 +485,7 @@ def load_npe(
     ).reshape(-1)
     theta_dim = int(theta_probe.numel())
 
-    embedding_net = _build_npe_embedding_net(saved_cfg, T=T, P=P)
+    embedding_net = _build_npe_embedding_net(saved_cfg, T=T, P=P, autoregressive=ar)
     est_builder = _build_npe_estimator_builder(saved_cfg, embedding_net)
 
     dummy_theta = torch.randn(2, theta_dim, device=dev)
@@ -404,7 +578,9 @@ def run_sbc_npe(
 
     P = max_num_pulses()
     T = int(cfg.NUM_TRIALS_OBS)
-    trial_dim = trial_feature_dim(P)
+    ar = bool(getattr(cfg, "AUTOREGRESSIVE", False))
+    trial_dim = trial_feature_dim(P, ar=ar)
+    session_fn = _pick_session_simulator(ar)
 
     theta_probe = torch.as_tensor(
         prior_theta.sample((1,)),
@@ -427,7 +603,7 @@ def run_sbc_npe(
             dtype=torch.float32,
         ).reshape(-1)
 
-        _, x_o = simulate_training_sessions(
+        _, x_o = session_fn(
             prior_theta,
             num_sessions=1,
             num_trials=T,

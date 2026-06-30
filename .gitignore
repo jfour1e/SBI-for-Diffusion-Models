@@ -21,18 +21,31 @@ logs/
 sbi-logs/
 sbc_outputs/
 sbc_outputs_lapse/
+sbc_npe_outputs*/
 npe_outputs/
 npe_outputs_lapse/
 marmoset_outputs/
 marmoset_outputs_mixed/
-group_outputs/
-group_outputs_all_stages/
-prior_predictive_outputs/
-prior_predictive_outputs_v3/
-posterior_update_outputs/
+group_outputs*/
+prior_predictive_outputs*/
+posterior_update_outputs*/
+model_comparison*/
 
-# Local data
+# Pre-simulated corpora (large; regenerable from priors)
+corpus/
+corpus_*/
+
+# Smoke-test artifacts (not real runs)
+models_smoke/
+
+# Local data (large; do not commit)
 marmoset_data.csv.gz
+ALLspecies_trials_combined.csv
+*_trials_combined.csv
+*.csv.gz
 
 # Cluster job scripts
 *.sh
+
+# Local docs (not committed)
+MOUSE_PIPELINE.md

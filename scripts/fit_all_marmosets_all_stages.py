@@ -46,9 +46,13 @@ torch.distributions.Distribution.set_default_validate_args(False)
 
 from sbi.inference.posteriors import DirectPosterior
 
-from sbi_for_diffusion_models.priors import build_prior_theta_lapse
+from sbi_for_diffusion_models.model_specs import select_model
 from sbi_for_diffusion_models.models.rt_choice_model import max_num_pulses
-from sbi_for_diffusion_models.models.lapse_rt_choice_model import simulate_rt_choice_batch_lapse
+from sbi_for_diffusion_models.data_simulator import (
+    simulate_training_sessions,
+    simulate_training_sessions_ar,
+    trial_feature_dim,
+)
 from sbi_for_diffusion_models.mnpe import load_npe_decoupled
 from sbi_for_diffusion_models.load_marmoset import load_marmoset_sessions
 from sbi_for_diffusion_models.run_config import RUN_CONFIG_PARAMS, T_MAX
@@ -73,13 +77,22 @@ N_PPC       = int(os.environ.get("N_PPC",  "200"))
 SEED        = int(os.environ.get("SEED",   "0"))
 OUTDIR      = os.environ.get("OUTDIR",     "group_outputs_all_stages")
 MODEL_DIR   = os.path.expanduser(os.environ.get("MODEL_DIR", "models"))
-MODEL_FILE  = os.environ.get("MODEL_FILE", "npe_lapse_mixed_100_090_080_070_060.pt")
+MODEL_NAME  = os.environ.get("MODEL_NAME", "lapse")
 DATA_PATH   = os.environ.get(
     "DATA_PATH", "/projectnb/ssmsvi/rsenne/data_marmoset/marmoset_data.csv.gz"
 )
 ANIMALS_FILTER = os.environ.get("ANIMALS", "").strip()
 
-PARAM_NAMES = ["a0", "lam", "v", "B", "tau", "p_lapse"]
+
+def _default_model_file(model_name: str, cfg) -> str:
+    values = "_".join(f"{int(round(v * 100)):03d}" for v in cfg.P_SUCCESS_TRAIN_VALUES)
+    return f"npe_{model_name}_mixed_{values}.pt"
+
+
+# Resolved per-run from MODEL_NAME and the loaded checkpoint.
+_, _, PARAM_NAMES_TUPLE, _MODEL_TAG, AUTOREGRESSIVE = select_model(MODEL_NAME)
+PARAM_NAMES = list(PARAM_NAMES_TUPLE)
+MODEL_FILE  = os.environ.get("MODEL_FILE", _default_model_file(MODEL_NAME, cfg))
 
 
 def _random_pulses(T: int, P: int, p_success: float, dev: torch.device):
@@ -96,27 +109,63 @@ def _random_pulses(T: int, P: int, p_success: float, dev: torch.device):
 @torch.no_grad()
 def simulate_from_posterior(posterior_samples: np.ndarray, n_ppc: int,
                             T: int, P: int, p_success: float,
+                            *, simulate_batch_fn, autoregressive: bool,
                             device: str = "cpu") -> dict:
+    """One PPC draw per posterior sample. For AR, simulate trials sequentially
+    via simulate_training_sessions_ar; otherwise iid trials with random pulses."""
     dev = torch.device(device)
     replace = len(posterior_samples) < n_ppc
     idx = np.random.choice(len(posterior_samples), size=n_ppc, replace=replace)
     theta = torch.tensor(posterior_samples[idx], dtype=torch.float32, device=dev)
 
+    log_tmax = math.log(T_MAX) if cfg.LOG_RT_MANUALLY else T_MAX
+    trial_dim_ar = trial_feature_dim(P, ar=True)
+
     all_rt, all_choice, all_hit, all_correct = [], [], [], []
-    for i in range(n_ppc):
-        th_i = theta[i].unsqueeze(0).expand(T, -1)
-        pulses, correct_side_i = _random_pulses(T, P, p_success, dev)
-        x_raw_i, hit_i, _ = simulate_rt_choice_batch_lapse(
-            th_i,
-            pulse_sides=pulses,
+
+    if autoregressive:
+        # batch all n_ppc posterior samples through one AR session simulator call
+        _, x_flat = simulate_training_sessions_ar(
+            prior_theta=None,
+            num_sessions=n_ppc,
+            num_trials=T,
+            simulate_batch_fn=simulate_batch_fn,
+            device=dev,
             mu_sensory=float(cfg.MU_SENSORY),
-            p_success=p_success,
+            p_success=float(p_success),
+            P=P,
+            log_rt=bool(cfg.LOG_RT_MANUALLY),
+            seed=int(np.random.randint(0, 2**31 - 1)),
+            theta=theta,
+            warn_on_timeouts=False,
         )
-        correct_choice = ((correct_side_i > 0).long()).cpu().numpy().astype(np.int32)
-        all_rt.append(x_raw_i[:, 0].cpu().numpy().astype(np.float32))
-        all_choice.append(x_raw_i[:, 1].cpu().numpy().astype(np.int32))
-        all_hit.append(hit_i.cpu().numpy().astype(bool))
-        all_correct.append(correct_choice)
+        x_3d = x_flat.view(n_ppc, T, trial_dim_ar).cpu().numpy()
+        for i in range(n_ppc):
+            log_rt_i = x_3d[i, :, 0]
+            choice_i = x_3d[i, :, 1].astype(np.int32)
+            pulses_i = x_3d[i, :, 4:]
+            rt_i = np.exp(log_rt_i) if cfg.LOG_RT_MANUALLY else log_rt_i
+            hit_i = log_rt_i < log_tmax - 1e-4
+            correct_side_i = (pulses_i.sum(axis=-1) > 0).astype(np.int32)
+            all_rt.append(rt_i.astype(np.float32))
+            all_choice.append(choice_i)
+            all_hit.append(hit_i)
+            all_correct.append(correct_side_i)
+    else:
+        for i in range(n_ppc):
+            th_i = theta[i].unsqueeze(0).expand(T, -1)
+            pulses, correct_side_i = _random_pulses(T, P, p_success, dev)
+            x_raw_i, hit_i, _ = simulate_batch_fn(
+                th_i,
+                pulse_sides=pulses,
+                mu_sensory=float(cfg.MU_SENSORY),
+                p_success=p_success,
+            )
+            correct_choice = ((correct_side_i > 0).long()).cpu().numpy().astype(np.int32)
+            all_rt.append(x_raw_i[:, 0].cpu().numpy().astype(np.float32))
+            all_choice.append(x_raw_i[:, 1].cpu().numpy().astype(np.int32))
+            all_hit.append(hit_i.cpu().numpy().astype(bool))
+            all_correct.append(correct_choice)
 
     rt           = np.stack(all_rt)
     choice       = np.stack(all_choice)
@@ -140,13 +189,13 @@ def simulate_from_posterior(posterior_samples: np.ndarray, n_ppc: int,
     }
 
 
-def _extract_real(x_flat: torch.Tensor, P: int) -> dict:
-    trial_dim = 2 + P
+def _extract_real(x_flat: torch.Tensor, P: int, autoregressive: bool = False) -> dict:
+    trial_dim = trial_feature_dim(P, ar=autoregressive)
     T = x_flat.shape[1] // trial_dim
     x = x_flat.reshape(T, trial_dim).numpy()
     log_rt = x[:, 0]
     choice = x[:, 1].astype(int)
-    pulses = x[:, 2:]
+    pulses = x[:, (4 if autoregressive else 2):]
     rt = np.exp(log_rt) if cfg.LOG_RT_MANUALLY else log_rt
     hit = rt < float(T_MAX) - 0.01
     pulse_sum = pulses.sum(axis=1)
@@ -226,14 +275,18 @@ def fit_one_cell(
     animal: str, group: str, stage: str,
     posterior: DirectPosterior, embedding_net: torch.nn.Module,
     device: str, outdir: str,
+    *,
+    simulate_batch_fn,
+    autoregressive: bool,
 ) -> CellResult | None:
     P = max_num_pulses()
-    trial_dim = 2 + P
+    trial_dim = trial_feature_dim(P, ar=autoregressive)
 
     try:
         sessions, _meta = load_marmoset_sessions(
             csv_path=DATA_PATH, animal=animal, stage=stage,
             log_rt=bool(cfg.LOG_RT_MANUALLY), seed=SEED,
+            autoregressive=autoregressive,
         )
     except Exception as e:
         print(f"  [skip] {animal} / {stage}: {e}")
@@ -271,11 +324,13 @@ def fit_one_cell(
 
     if stage in PPC_STAGES:
         try:
-            real_combined = _extract_real(x_combined.cpu(), P)
+            real_combined = _extract_real(x_combined.cpu(), P, autoregressive=autoregressive)
             p_succ = STAGE_P_SUCCESS.get(stage, float(cfg.P_SUCCESS))
             sim = simulate_from_posterior(
                 samples, N_PPC, T=int(cfg.NUM_TRIALS_OBS), P=P,
                 p_success=p_succ, device="cpu",
+                simulate_batch_fn=simulate_batch_fn,
+                autoregressive=autoregressive,
             )
             plot_ppc(
                 real_combined, sim,
@@ -329,10 +384,16 @@ def per_stage_group_tests(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def cross_condition_mixed_anova(df: pd.DataFrame) -> pd.DataFrame:
-    """Mixed-effects ANOVA per parameter via statsmodels MixedLM.
+    """Cluster-robust 2-way ANOVA per parameter.
 
-    Model: y ~ C(group) * C(stage), random intercept per animal.
-    Reports Wald tests for the group, stage, and group x stage terms.
+    Model: y ~ C(group) * C(stage), OLS with cluster-robust SE clustered on
+    animal (CR1 / sandwich). Equivalent in interpretation to a 2-way mixed
+    ANOVA with animal as the repeated-measures factor, but doesn't require
+    estimating a random-effects variance component — so it handles params
+    where MixedLM's MLE lands near the boundary (which previously produced
+    NaNs / singular-matrix errors on v, p_lapse, w_err).
+
+    Reports Wald p-values for the group, stage, and group x stage terms.
     """
     import statsmodels.formula.api as smf
 
@@ -343,22 +404,27 @@ def cross_condition_mixed_anova(df: pd.DataFrame) -> pd.DataFrame:
             rows.append(dict(param=p, error="insufficient factor levels"))
             continue
         try:
-            md = smf.mixedlm("y ~ C(group) * C(stage)", data=sub, groups=sub["animal"])
-            mf = md.fit(reml=False, method="lbfgs", maxiter=200, disp=False)
+            mf = smf.ols("y ~ C(group) * C(stage)", data=sub).fit(
+                cov_type="cluster",
+                cov_kwds={"groups": sub["animal"]},
+            )
             wt = mf.wald_test_terms(skip_single=False)
             tbl = wt.summary_frame()
-            row = dict(param=p, n_obs=len(sub),
-                       n_animals=sub["animal"].nunique(),
-                       converged=bool(mf.converged),
-                       loglik=float(mf.llf))
+            row = dict(
+                param=p,
+                n_obs=len(sub),
+                n_animals=sub["animal"].nunique(),
+                method="ols+cluster_robust",
+                rsq=float(mf.rsquared),
+            )
             for term, idx in [("group_p", "C(group)"),
                               ("stage_p", "C(stage)"),
                               ("interaction_p", "C(group):C(stage)")]:
                 if idx in tbl.index:
                     r = tbl.loc[idx]
-                    row[term]                  = float(r.get("P>chi2", r.get("pvalue", np.nan)))
+                    row[term] = float(r.get("P>chi2", r.get("pvalue", np.nan)))
                     row[term.replace("_p", "_chi2")] = float(r.get("chi2", r.get("statistic", np.nan)))
-                    row[term.replace("_p", "_df")]   = float(r.get("df_constraint", r.get("df", np.nan)))
+                    row[term.replace("_p", "_df")] = float(r.get("df_constraint", r.get("df", np.nan)))
             rows.append(row)
         except Exception as e:
             rows.append(dict(param=p, error=f"{e.__class__.__name__}: {e}"))
@@ -578,14 +644,21 @@ def main() -> None:
     print(f"Found {len(roster)} (animal, stage) cells across "
           f"{roster['name'].nunique()} animals and {roster['stage'].nunique()} stages.")
 
-    prior_theta = build_prior_theta_lapse()
+    simulate_batch_fn, prior_theta, _param_names, _model_tag, autoregressive = select_model(MODEL_NAME)
     if hasattr(prior_theta, "to"):
         prior_theta.to(dev)
     model_path = os.path.join(MODEL_DIR, MODEL_FILE)
-    print(f"\nLoading NPE from {model_path} on {device} ...")
-    de, embedding_net, _saved_cfg, _T = load_npe_decoupled(
+    print(f"\nLoading NPE from {model_path} on {device} (MODEL_NAME={MODEL_NAME}, ar={autoregressive}) ...")
+    de, embedding_net, saved_cfg, _T = load_npe_decoupled(
         model_path, prior_theta=prior_theta, device=device,
     )
+    saved_ar = bool(getattr(saved_cfg, "AUTOREGRESSIVE", False))
+    if saved_ar != autoregressive:
+        raise RuntimeError(
+            f"MODEL_NAME={MODEL_NAME!r} implies autoregressive={autoregressive}, "
+            f"but checkpoint at {model_path} was trained with AUTOREGRESSIVE={saved_ar}. "
+            f"Either pick the matching MODEL_NAME or point MODEL_FILE at a matching checkpoint."
+        )
     posterior = DirectPosterior(
         posterior_estimator=de, prior=prior_theta, device=device,
     )
@@ -598,6 +671,8 @@ def main() -> None:
                 animal=animal, group=group, stage=stage,
                 posterior=posterior, embedding_net=embedding_net,
                 device=device, outdir=OUTDIR,
+                simulate_batch_fn=simulate_batch_fn,
+                autoregressive=autoregressive,
             )
         except Exception:
             print(f"  [err] {animal} / {stage} failed:")

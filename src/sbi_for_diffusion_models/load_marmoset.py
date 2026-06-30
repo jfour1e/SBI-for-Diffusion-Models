@@ -56,12 +56,20 @@ def load_marmoset_sessions(
     p_max: int = P_MAX,
     seed: int = 0,
     min_trials: int = 64,
+    autoregressive: bool = False,
 ) -> tuple[list[Tensor], list[dict]]:
     """
     Load and preprocess marmoset behavioral data into NPE-ready session tensors.
+
+    If `autoregressive=True`, per-trial features become
+        [log_rt, choice, prev_choice_signed, prev_outcome_signed, pulse_1..P]
+    where prev_*_signed ∈ {-1, 0, +1} (0 = first trial in session). Trial order
+    within each session is preserved (sorted by trial_datetime if present, else
+    by row order in the CSV; if subsampling, the sample is sorted before AR
+    threading).
     """
     rng = np.random.default_rng(seed)
-  
+
     df = pd.read_csv(
         csv_path,
         compression="infer",
@@ -72,7 +80,7 @@ def load_marmoset_sessions(
     if len(df) == 0:
         raise ValueError(f"No trials found for animal={animal!r}, stage={stage!r}")
 
-    trial_dim = 2 + p_max
+    trial_dim = (4 if autoregressive else 2) + p_max
     sessions: list[Tensor] = []
     session_meta: list[dict] = []
 
@@ -91,15 +99,16 @@ def load_marmoset_sessions(
         T = len(grp)
         x = np.zeros((T, trial_dim), dtype=np.float32)
 
+        prev_choice_signed = 0.0
+        prev_outcome_signed = 0.0
+
         for i, row in grp.iterrows():
             rt      = float(row["rt"])
             choice  = row["choice"]
             fl      = str(row["flashes_left"])
             fr      = str(row["flashes_right"])
 
-            # RT (log or raw)
             rt_stored = math.log(max(rt, 1e-6)) if log_rt else rt
-            # choice in absolute direction (right=1, left=0)
             choice_val = 1.0 if choice == "right" else 0.0
 
             pulses = _flash_string_to_pulses(
@@ -108,9 +117,20 @@ def load_marmoset_sessions(
                 p_max=p_max,
             )
 
-            x[i, 0]  = rt_stored
-            x[i, 1]  = choice_val
-            x[i, 2:] = pulses
+            x[i, 0] = rt_stored
+            x[i, 1] = choice_val
+            if autoregressive:
+                x[i, 2] = prev_choice_signed
+                x[i, 3] = prev_outcome_signed
+                x[i, 4:] = pulses
+
+                this_choice_signed = 1.0 if choice == "right" else -1.0
+                correct = (choice == row["correct_side"])
+                this_outcome_signed = 1.0 if correct else -1.0
+                prev_choice_signed = this_choice_signed
+                prev_outcome_signed = this_outcome_signed
+            else:
+                x[i, 2:] = pulses
 
         x_flat = torch.from_numpy(x).reshape(1, -1)  # (1, T * trial_dim)
 
@@ -124,9 +144,10 @@ def load_marmoset_sessions(
         })
 
     cap_str = str(num_trials_per_session) if num_trials_per_session is not None else "all"
+    ar_str = " AR" if autoregressive else ""
     print(
-        f"Loaded {len(sessions)} sessions for {animal} ({stage})  "
-        f"[T_per_session={cap_str}, P={p_max}]"
+        f"Loaded {len(sessions)} sessions for {animal} ({stage}){ar_str}  "
+        f"[T_per_session={cap_str}, P={p_max}, trial_dim={trial_dim}]"
     )
     for m in session_meta:
         print(
